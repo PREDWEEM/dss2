@@ -537,20 +537,42 @@ fig_er.update_xaxes(range=[fi, ff], dtick="D1" if (ff-fi).days <= 31 else "M1", 
 fig_er.update_yaxes(rangemode="tozero")
 st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
 
-# (NUEVO) Panel Ciec/LAI
+# ======= Gráfico combinado solicitado =======
+st.subheader("EMERREL, EMERREL×Ciec, Ciec e ICIC — en un mismo gráfico")
+fig_all = go.Figure()
+# Barras: EMERREL original y ajustada por Ciec (si hay)
+fig_all.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL (0-1)", opacity=0.35)
 if use_ciec:
-    st.subheader("Trigo: LAI y Ciec (competencia del cultivo)")
+    emerrel_x_ciec = (base_emerrel * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
+    fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec, name="EMERREL × Ciec (0-1)", opacity=0.65)
+# Líneas: Ciec e ICIC
+if use_ciec:
+    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0-1)"))
+if use_icic:
+    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0-1)"))
+fig_all.update_layout(xaxis_title="Fecha", yaxis_title="Valor (0-1)", hovermode="x unified", height=520,
+                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
+
+# (NUEVO) Panel combinado: EMERREL, EMERREL ajustada, Ciec, ICIC
+if use_ciec:
+    st.subheader("Competencia y emergencia (Ciec + ICIC + EMERREL)")
     figc = go.Figure()
-    figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["LAI_trigo"], name="LAI trigo", mode="lines"))
-    figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], name="Ciec_t (0-1)", mode="lines"))
+    # Curvas EMERREL
+    figc.add_trace(go.Scatter(x=pred["Fecha"], y=base_emerrel, name="EMERREL original", mode="lines", line=dict(color="#1f77b4")))
+    if apply_ciec_to_emerrel:
+        figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["EMERREL(0-1)"], name="EMERREL × Ciec", mode="lines", line=dict(color="#ff7f0e")))
+    # Curva Ciec
+    figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], name="Ciec_t (0-1)", mode="lines", line=dict(dash="dot", color="#2ca02c")))
+    # ICIC si existe en pred
+    if "M_t" in pred.columns:
+        figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["M_t"], name="ICIC M_t (0-1)", mode="lines", line=dict(dash="dash", color="#d62728")))
+    # Línea vertical de siembra
     try:
         figc.add_vline(x=pd.to_datetime(fecha_siembra_ciec), line_dash="dot", line_color="#555", annotation_text="Siembra", annotation_position="top left")
     except Exception:
         pass
-    if apply_ciec_to_emerrel:
-        figc.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL sin ajuste", opacity=0.35)
-        figc.add_bar(x=pred["Fecha"], y=pred["EMERREL(0-1)"], name="EMERREL × Ciec", opacity=0.6)
-    figc.update_layout(height=520, margin=dict(l=10,r=10,t=30,b=10), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+    figc.update_layout(height=600, margin=dict(l=10,r=10,t=30,b=10), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
     st.plotly_chart(figc, use_container_width=True, theme="streamlit")
 
 # EMERGENCIA ACUMULADA
@@ -596,4 +618,3 @@ st.download_button(
     data=buf.getvalue(), file_name=f"AVEFA_resultados_{'todo' if rango_opcion=='Todo el empalme' else 'rango'}.csv",
     mime="text/csv"
 )
-
