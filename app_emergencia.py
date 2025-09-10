@@ -18,6 +18,10 @@ from pathlib import Path
 import plotly.graph_objects as go
 from typing import Callable, Any, List
 
+# Defaults defensivos para evitar NameError en reruns parciales
+use_ciec: bool = False
+use_icic: bool = False
+
 # =================== CONFIG UI / LOCKDOWN ===================
 st.set_page_config(page_title="Predicción de Emergencia Agrícola AVEFA", layout="wide")
 st.markdown(
@@ -539,20 +543,25 @@ st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
 
 # ======= Gráfico combinado solicitado =======
 st.subheader("EMERREL, EMERREL×Ciec, Ciec e ICIC — en un mismo gráfico")
-fig_all = go.Figure()
-# Barras: EMERREL original y ajustada por Ciec (si hay)
-fig_all.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL (0-1)", opacity=0.35)
-if use_ciec:
-    emerrel_x_ciec = (base_emerrel * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
-    fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec, name="EMERREL × Ciec (0-1)", opacity=0.65)
-# Líneas: Ciec e ICIC
-if use_ciec:
-    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0-1)"))
-if use_icic:
-    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0-1)"))
-fig_all.update_layout(xaxis_title="Fecha", yaxis_title="Valor (0-1)", hovermode="x unified", height=520,
-                      legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
-st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
+try:
+    fig_all = go.Figure()
+    # Barras: EMERREL original y ajustada por Ciec (si hay)
+    fig_all.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL (0-1)", opacity=0.35)
+    if use_ciec:
+        emerrel_x_ciec = (base_emerrel * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
+        fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec, name="EMERREL × Ciec (0-1)", opacity=0.65)
+    # Líneas: Ciec e ICIC
+    if use_ciec:
+        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0-1)"))
+    if use_icic:
+        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0-1)"))
+    fig_all.update_layout(xaxis_title="Fecha", yaxis_title="Valor (0-1)", hovermode="x unified", height=520,
+                          legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+    st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
+except Exception as e:
+    st.warning(f"No se pudo renderizar el gráfico combinado (EMERREL×Ciec/ICIC). Detalle: {e}")
+except Exception as e:
+    st.warning(f"No se pudo renderizar el gráfico combinado (error: {e})")
 
 # (NUEVO) Panel combinado: EMERREL, EMERREL ajustada, Ciec, ICIC
 if use_ciec:
