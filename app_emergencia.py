@@ -375,6 +375,8 @@ meteo_history_url_override = st.sidebar.text_input(
     help="Podés pegar blob o raw; se convierte a raw automáticamente."
 )
 ALPHA = st.sidebar.slider("Opacidad relleno MA5", 0.0, 1.0, 0.70, 0.05)
+# Mostrar eje Y con valores reales de la MA5 (pl·m⁻² día⁻¹)
+Y_MA5_REAL = st.sidebar.checkbox("Eje Y: mostrar valores reales de MA5 (pl·m⁻² d⁻¹)", value=False)
 
 # (NUEVO) Bloque Ciec (trigo)
 st.sidebar.markdown("---")
@@ -464,6 +466,9 @@ pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
 max_val = pd.to_numeric(pred["EMERREL(0-1)"], errors="coerce").max()
 scale_factor = 350.0 / max_val if pd.notna(max_val) and max_val > 0 else np.nan
 pred["EMERREL_pl_m2"] = pred["EMERREL(0-1)"].astype(float) * (scale_factor if pd.notna(scale_factor) else np.nan)
+# MA5 global (normalizada y en pl·m⁻² día⁻¹)
+pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(5, min_periods=1).mean()
+pred["EMERREL_MA5_pl_m2"] = pred["EMERREL_MA5"] * (scale_factor if pd.notna(scale_factor) else np.nan)
 # Si luego ajustamos por Ciec, el mismo factor permite comparar en la misma escala (barras)
 
 
@@ -508,42 +513,69 @@ st.title("Predicción de Emergencia Agrícola AVEFA")
 
 # EMERGENCIA RELATIVA DIARIA
 st.subheader("EMERGENCIA RELATIVA DIARIA")
+# MA5 por vista y su versión en pl·m⁻²
 pred_vis["EMERREL_MA5"] = pred_vis["EMERREL(0-1)"].rolling(5, min_periods=1).mean()
+pred_vis["EMERREL_MA5_pl_m2"] = pred_vis["EMERREL_MA5"] * (scale_factor if pd.notna(scale_factor) else np.nan)
 colores_vis = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna("#808080").to_numpy()
 
 fig_er = go.Figure()
-fig_er.add_bar(
-    x=pred_vis["Fecha"], y=pred_vis["EMERREL(0-1)"],
-    marker=dict(color=colores_vis.tolist()),
-    customdata=pred_vis["Nivel_Emergencia_relativa"].map({"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}),
-    hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
-    name="EMERREL (0-1)"
-)
-
-# Relleno tricolor bajo MA5
-x = pred_vis["Fecha"]; ma = pred_vis["EMERREL_MA5"].clip(lower=0)
-thr_low, thr_med = float(THR_BAJO_MEDIO), float(THR_MEDIO_ALTO)
-y0 = np.zeros(len(ma)); y1 = np.minimum(ma, thr_low); y2 = np.minimum(ma, thr_med); y3 = ma
-
-GREEN_RGBA  = f"rgba(0,166,81,{ALPHA})"
-YELLOW_RGBA = f"rgba(255,192,0,{ALPHA})"
-RED_RGBA    = f"rgba(229,57,53,{ALPHA})"
-
-fig_er.add_trace(go.Scatter(x=x, y=y0, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=GREEN_RGBA, hoverinfo="skip", showlegend=False, name="Zona baja (verde)"))
-fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=YELLOW_RGBA, hoverinfo="skip", showlegend=False, name="Zona media (amarillo)"))
-fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-fig_er.add_trace(go.Scatter(x=x, y=y3, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=RED_RGBA, hoverinfo="skip", showlegend=False, name="Zona alta (rojo)"))
-fig_er.add_trace(go.Scatter(x=x, y=ma, mode="lines", line=dict(width=2), name="Media móvil 5 días",
-                            hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"))
-
-fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_low, thr_low], mode="lines", line=dict(color=COLOR_MAP["Bajo"], dash="dot"), name=f"Bajo (≤ {thr_low:.3f})", hoverinfo="skip"))
-fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_med, thr_med], mode="lines", line=dict(color=COLOR_MAP["Medio"], dash="dot"), name=f"Medio (≤ {thr_med:.3f})", hoverinfo="skip"))
-fig_er.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_MAP["Alto"], dash="dot"), name=f"Alto (> {thr_med:.3f})", hoverinfo="skip"))
+if Y_MA5_REAL:
+    # --- Escala real (pl·m⁻² d⁻¹) ---
+    # Barras en pl·m⁻² d⁻¹
+    fig_er.add_bar(
+        x=pred_vis["Fecha"], y=pred_vis["EMERREL_pl_m2"],
+        marker=dict(color=colores_vis.tolist()),
+        customdata=pred_vis["Nivel_Emergencia_relativa"].map({"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}),
+        hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.1f} pl·m⁻² d⁻¹<br>Nivel: %{customdata}<extra></extra>",
+        name="EMERREL (pl·m⁻² d⁻¹)"
+    )
+    # Relleno tricolor interno bajo MA5 real
+    x = pred_vis["Fecha"]; ma_pl = pred_vis["EMERREL_MA5_pl_m2"].clip(lower=0)
+    thr_low_pl = (float(THR_BAJO_MEDIO) * scale_factor) if pd.notna(scale_factor) else np.nan
+    thr_med_pl = (float(THR_MEDIO_ALTO) * scale_factor) if pd.notna(scale_factor) else np.nan
+    y0 = np.zeros(len(ma_pl)); y1 = np.minimum(ma_pl, thr_low_pl); y2 = np.minimum(ma_pl, thr_med_pl); y3 = ma_pl
+    GREEN_RGBA  = f"rgba(0,166,81,{ALPHA})"; YELLOW_RGBA = f"rgba(255,192,0,{ALPHA})"; RED_RGBA = f"rgba(229,57,53,{ALPHA})"
+    fig_er.add_trace(go.Scatter(x=x, y=y0, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=GREEN_RGBA, hoverinfo="skip", showlegend=False, name="Zona baja (verde)"))
+    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=YELLOW_RGBA, hoverinfo="skip", showlegend=False, name="Zona media (amarillo)"))
+    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y3, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=RED_RGBA, hoverinfo="skip", showlegend=False, name="Zona alta (rojo)"))
+    fig_er.add_trace(go.Scatter(x=x, y=ma_pl, mode="lines", line=dict(width=2), name="Media móvil 5 días (pl·m⁻² d⁻¹)",
+                                hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.1f} pl·m⁻² d⁻¹<extra></extra>"))
+    # Umbrales en pl·m⁻² d⁻¹
+    if pd.notna(thr_low_pl):
+        fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_low_pl, thr_low_pl], mode="lines", line=dict(color=COLOR_MAP["Bajo"], dash="dot"), name=f"Bajo (≤ {thr_low_pl:.1f})", hoverinfo="skip"))
+    if pd.notna(thr_med_pl):
+        fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_med_pl, thr_med_pl], mode="lines", line=dict(color=COLOR_MAP["Medio"], dash="dot"), name=f"Medio (≤ {thr_med_pl:.1f})", hoverinfo="skip"))
+    fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL / MA5 (pl·m⁻² d⁻¹)", hovermode="x unified", legend_title="Referencias", height=650)
+else:
+    # --- Escala normalizada (0–1) ---
+    fig_er.add_bar(
+        x=pred_vis["Fecha"], y=pred_vis["EMERREL(0-1)"],
+        marker=dict(color=colores_vis.tolist()),
+        customdata=pred_vis["Nivel_Emergencia_relativa"].map({"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}),
+        hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
+        name="EMERREL (0-1)"
+    )
+    x = pred_vis["Fecha"]; ma = pred_vis["EMERREL_MA5"].clip(lower=0)
+    thr_low, thr_med = float(THR_BAJO_MEDIO), float(THR_MEDIO_ALTO)
+    y0 = np.zeros(len(ma)); y1 = np.minimum(ma, thr_low); y2 = np.minimum(ma, thr_med); y3 = ma
+    GREEN_RGBA  = f"rgba(0,166,81,{ALPHA})"; YELLOW_RGBA = f"rgba(255,192,0,{ALPHA})"; RED_RGBA = f"rgba(229,57,53,{ALPHA})"
+    fig_er.add_trace(go.Scatter(x=x, y=y0, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=GREEN_RGBA, hoverinfo="skip", showlegend=False, name="Zona baja (verde)"))
+    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=YELLOW_RGBA, hoverinfo="skip", showlegend=False, name="Zona media (amarillo)"))
+    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
+    fig_er.add_trace(go.Scatter(x=x, y=y3, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=RED_RGBA, hoverinfo="skip", showlegend=False, name="Zona alta (rojo)"))
+    fig_er.add_trace(go.Scatter(x=x, y=ma, mode="lines", line=dict(width=2), name="Media móvil 5 días",
+                                hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"))
+    fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_low, thr_low], mode="lines", line=dict(color=COLOR_MAP["Bajo"], dash="dot"), name=f"Bajo (≤ {thr_low:.3f})", hoverinfo="skip"))
+    fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_med, thr_med], mode="lines", line=dict(color=COLOR_MAP["Medio"], dash="dot"), name=f"Medio (≤ {thr_med:.3f})", hoverinfo="skip"))
+    fig_er.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_MAP["Alto"], dash="dot"), name=f"Alto (> {thr_med:.3f})", hoverinfo="skip"))
+    fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)", hovermode="x unified", legend_title="Referencias", height=650)
 
 fi, ff = pred_vis["Fecha"].min(), pred_vis["Fecha"].max()
-fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)", hovermode="x unified", legend_title="Referencias", height=650)
 fig_er.update_xaxes(range=[fi, ff], dtick="D1" if (ff-fi).days <= 31 else "M1", tickformat="%d-%b" if (ff-fi).days <= 31 else "%b")
 fig_er.update_yaxes(rangemode="tozero")
 st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
@@ -569,15 +601,17 @@ try:
         fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0–1)", yaxis="y2"))
 
     # Layout de doble eje
-    fig_all.update_layout(
-        hovermode="x unified",
-        height=560,
-        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-        xaxis=dict(title="Fecha"),
-        yaxis=dict(title="Densidad diaria (pl·m⁻² día⁻¹)", rangemode="tozero"),
-        yaxis2=dict(title="Valores normalizados (0–1)", overlaying='y', side='right', range=[0,1])
-    )
-    st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
+    # Añadimos MA5 real en eje izquierdo
+fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["EMERREL_MA5_pl_m2"], mode="lines", name="MA5 (pl·m⁻² d⁻¹)", yaxis="y1"))
+fig_all.update_layout(
+    hovermode="x unified",
+    height=560,
+    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+    xaxis=dict(title="Fecha"),
+    yaxis=dict(title="Densidad diaria (pl·m⁻² día⁻¹)", rangemode="tozero"),
+    yaxis2=dict(title="Valores normalizados (0–1)", overlaying='y', side='right', range=[0,1])
+)
+st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
 except Exception as e:
     st.warning(f"No se pudo renderizar el gráfico combinado (versiones + ejes): {e}")
 except Exception as e:
