@@ -1,686 +1,614 @@
 # -*- coding: utf-8 -*-
-# app_emergencia.py — AVEFA (empalme estricto, JD como verdad, sin calendarizar) + Ciec (trigo) opcional
-# - Histórico: BORDE2025.csv (01-ene-2025 → 03-sep-2025 inclusive, desde GitHub)
-# - Futuro: meteo_history.csv (04-sep-2025 → última fecha realmente presente)
-# - Lectura determinista por JD/Julian_days en ambos archivos (evita ambigüedades de formato)
-# - Sin calendarizar ni interpolar días faltantes; la RN se alimenta SOLO con días existentes
-# - Validador de continuidad (histórico y futuro)
-# - NUEVO: Cálculo de TT → LAI_trigo (ec.16) → Ciec_t (ec.9) con **Dt reiniciado en siembra** y
-#          ajuste opcional de EMERREL por supervivencia (EMERREL_ajustada = EMERREL × Ciec)
+# app.py — PREDWEEM · Manejo manual con ICIC + Ciec
+# - Ventana de siembra e ICIC dinámico
+# - Fechas de manejo manuales; residualidad 30–60d
+# - EMERAC cruda/ajustada opcional
+# - Bandas: residual (rango) y no residual (1 día)
+# - Conversión EMERREL → plantas·m²: pico(EMERREL_cruda) ≙ 350 pl·m²
+# - Eje derecho Plantas·m² (opcional) + tooltips con ambos valores
+# - ICIC encapsulado en compute_icic(...), forzando ICIC(siem.)=0
+# - Ciec(t) = (LAI/LAIhc) * (Cs/Ca), truncado a [0,1], con LAI=0 en siembra
+# - Figura principal: EMERREL (izq), Ciec/ICIC/EMERAC (der 0–1)
+#   Barras opcionales en Plantas·m² para: EMERREL×Ciec y EMERREL_eff (ICIC)
 
-import streamlit as st
+import io, re, json, math, datetime as dt
 import numpy as np
 import pandas as pd
-from io import BytesIO, StringIO
-from urllib.request import urlopen, Request
-from urllib.error import HTTPError, URLError
-from pathlib import Path
+import streamlit as st
 import plotly.graph_objects as go
-from typing import Callable, Any, List
+from urllib.request import urlopen, Request
+from urllib.error import URLError, HTTPError
 
-# Defaults defensivos para evitar NameError en reruns parciales
-use_ciec: bool = False
-use_icic: bool = False
+APP_TITLE = "PREDWEEM · Manejo manual con ICIC + Ciec (bandas no residuales)"
+st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
+st.title(APP_TITLE)
+st.caption("EMERREL/ICIC/Ciec con manejo manual. EMERAC opcional y bandas: residual (rango) y no residual (1 día).")
 
-# =================== CONFIG UI / LOCKDOWN ===================
-st.set_page_config(page_title="Predicción de Emergencia Agrícola AVEFA", layout="wide")
-st.markdown(
-    """
-    <style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header [data-testid="stToolbar"] {visibility: hidden;}
-    .viewerBadge_container__1QSob {visibility: hidden;}
-    .stAppDeployButton {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True
-)
+# ----------------------------- Utilidades -----------------------------
+def sniff_sep_dec(text: str):
+    sample = text[:8000]
+    counts = {sep: sample.count(sep) for sep in [",", ";", "\t"]}
+    sep_guess = max(counts, key=counts.get) if counts else ","
+    dec_guess = "."
+    if sample.count(",") > sample.count(".") and re.search(r",\d", sample):
+        dec_guess = ","
+    return sep_guess, dec_guess
 
-# =================== HELPERS ===================
-
-def safe_run(fn: Callable[[], Any], user_msg: str):
-    try:
-        return fn()
-    except Exception:
-        st.error(user_msg)
-        return None
-
-def _safe_rerun():
-    try:
-        st.rerun()
-    except Exception:
-        try:
-            st.experimental_rerun()
-        except Exception:
-            st.warning("No pude forzar el rerun automáticamente. Volvé a ejecutar la app.")
-
-def _to_raw_url(u: str) -> str:
-    """Convierte URLs GitHub 'blob' a 'raw'. Deja intacto si ya es raw u otro host."""
-    if not isinstance(u, str) or not u:
-        return u
-    u = u.strip()
-    if "github.com" in u and "/blob/" in u:
-        return u.replace("https://github.com/", "https://raw.githubusercontent.com/").replace("/blob/", "/")
-    return u
-
-def _fetch_bytes(url: str, timeout: int = 20) -> bytes:
+@st.cache_data(show_spinner=False)
+def read_raw_from_url(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    try:
-        with urlopen(req, timeout=timeout) as resp:
-            return resp.read()
-    except (HTTPError, URLError):
-        raise RuntimeError(f"No se pudo descargar: {url}")
-    except Exception:
-        raise RuntimeError("Error descargando recurso remoto.")
+    with urlopen(req, timeout=30) as r:
+        return r.read()
 
-# =================== MODELO / PESOS ===================
-GITHUB_BASE_URL = "https://raw.githubusercontent.com/PREDWEEM/AVEFA2/main"
-FNAME_IW, FNAME_BIW, FNAME_LW, FNAME_BOUT = "IW.npy", "bias_IW.npy", "LW.npy", "bias_out.npy"
+def read_raw(up, url):
+    if up is not None:
+        return up.read()
+    if url:
+        return read_raw_from_url(url)
+    raise ValueError("No hay fuente de datos.")
 
-@st.cache_data(ttl=1800)
-def load_npy_from_fixed(filename: str) -> np.ndarray:
-    raw = _fetch_bytes(f"{GITHUB_BASE_URL}/{filename}")
-    return np.load(BytesIO(raw), allow_pickle=False)
+def parse_csv(raw, sep_opt, dec_opt, encoding="utf-8", on_bad="warn"):
+    head = raw[:8000].decode("utf-8", errors="ignore")
+    sep_guess, dec_guess = sniff_sep_dec(head)
+    sep = sep_guess if sep_opt == "auto" else ("," if sep_opt=="," else (";" if sep_opt==";" else "\t"))
+    dec = dec_guess if dec_opt == "auto" else dec_opt
+    df = pd.read_csv(io.BytesIO(raw), sep=sep, decimal=dec, engine="python",
+                     encoding=encoding, on_bad_lines=on_bad)
+    return df, {"sep": sep, "dec": dec, "enc": encoding}
 
-class PracticalANNModel:
-    def __init__(self, IW, bias_IW, LW, bias_out):
-        self.IW, self.bias_IW, self.LW = IW, bias_IW, LW
-        self.bias_out = float(bias_out)
-        # Orden de entrada: [Julian_days, TMIN, TMAX, Prec]
-        self.input_min = np.array([1, -7, 0, 0], dtype=float)
-        self.input_max = np.array([300, 25.5, 41, 84], dtype=float)
-        self._den = np.maximum(self.input_max - self.input_min, 1e-9)
-
-    def _tansig(self, x): return np.tanh(x)
-    def _normalize(self, X):
-        Xc = np.clip(X, self.input_min, self.input_max)
-        return 2 * (Xc - self.input_min) / self._den - 1
-    def _denorm_out(self, y, ymin=-1, ymax=1): return (y - ymin) / (ymax - ymin)
-
-    def predict(self, X_real, thr_bajo_medio, thr_medio_alto):
-        Xn = self._normalize(X_real)
-        z1 = Xn @ self.IW + self.bias_IW
-        a1 = self._tansig(z1)
-        LW2 = self.LW.reshape(1, -1) if self.LW.ndim == 1 else self.LW
-        z2 = (a1 @ LW2.T).ravel() + self.bias_out
-        y  = self._denorm_out(self._tansig(z2))  # [0,1]
-        ac = np.cumsum(y) / 8.05
-        diff = np.diff(ac, prepend=0)
-        niveles = np.where(diff <= THR_BAJO_MEDIO, "Bajo",
-                   np.where(diff <= THR_MEDIO_ALTO, "Medio", "Alto"))
-        return pd.DataFrame({"EMERREL(0-1)": diff, "Nivel_Emergencia_relativa": niveles})
-
-def cargar_modelo():
-    IW = load_npy_from_fixed(FNAME_IW)
-    b1 = load_npy_from_fixed(FNAME_BIW)
-    LW = load_npy_from_fixed(FNAME_LW)
-    bo = load_npy_from_fixed(FNAME_BOUT)
-    if LW.ndim == 1: LW = LW.reshape(1, -1)
-    bias_out = float(bo if np.ndim(bo)==0 else np.ravel(bo)[0])
-    assert IW.shape[0] == 4 and b1.shape[0] == IW.shape[1] and LW.shape == (1, IW.shape[1])
-    return PracticalANNModel(IW, b1, LW, bias_out)
-
-# =================== PARÁMETROS ===================
-THR_BAJO_MEDIO = 0.01
-THR_MEDIO_ALTO = 0.05
-EMEAC_MIN_DEN, EMEAC_ADJ_DEN, EMEAC_MAX_DEN = 3.0, 4.0, 5.0
-HIST_START = pd.Timestamp(2025, 1, 1)
-HIST_END   = pd.Timestamp(2025, 9, 3)  # inclusive
-COLOR_MAP = {"Bajo": "#00A651", "Medio": "#FFC000", "Alto": "#E53935"}
-
-# =================== SANITIZACIÓN (JD como verdad) ===================
-
-def _sanitize_generic_prefer_jd(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sanea meteo para BORDE2025 y meteo_history:
-    - Si hay JD/Julian_days/jd/etc, se usa para construir Fecha (verdad) desde 2025-01-01 + (JD-1).
-    - Si no hay JD, se parsea Fecha y se deriva JD.
-    - No calendariza ni rellena. Corrige Tmin/Tmax y clip Prec.
-    """
-    if df is None or df.empty:
-        return pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
-
-    df = df.copy()
-    df.columns = [str(c).strip() for c in df.columns]
-    lower = {c.lower(): c for c in df.columns}
-    def pick(*cands):
-        for c in cands:
-            if c in lower: return lower[c]
-        return None
-
-    c_fecha = pick("fecha","date")
-    c_jd    = pick("julian_days","julianday","doy","dia_juliano","dayofyear","juliano","jd")
-    c_tmax  = pick("tmax","t_max","tx")
-    c_tmin  = pick("tmin","t_min","tn")
-    c_prec  = pick("prec","ppt","precip","lluvia","prcp","mm")
-
-    mapping = {}
-    if c_fecha: mapping[c_fecha] = "Fecha"
-    if c_jd:    mapping[c_jd]    = "Julian_days"
-    if c_tmax:  mapping[c_tmax]  = "TMAX"
-    if c_tmin:  mapping[c_tmin]  = "TMIN"
-    if c_prec:  mapping[c_prec]  = "Prec"
-    if mapping: df = df.rename(columns=mapping)
-
-    # Tipos numéricos
-    if "Julian_days" in df.columns:
-        df["Julian_days"] = pd.to_numeric(df["Julian_days"], errors="coerce")
-
-    for c in ["TMAX","TMIN","Prec"]:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # Fecha/JD
-    if "Julian_days" in df.columns and df["Julian_days"].notna().any():
-        df["Fecha"] = pd.to_datetime("2025-01-01") + pd.to_timedelta(df["Julian_days"] - 1, unit="D")
-    elif "Fecha" in df.columns:
-        d1 = pd.to_datetime(df["Fecha"], errors="coerce", dayfirst=True)
-        d2 = pd.to_datetime(df["Fecha"], errors="coerce", dayfirst=False)
-        use_dayfirst = (d1.dt.year==2025).sum() >= (d2.dt.year==2025).sum()
-        df["Fecha"] = pd.to_datetime(df["Fecha"], errors="coerce", dayfirst=use_dayfirst)
-        df["Julian_days"] = df["Fecha"].dt.dayofyear
+def clean_numeric_series(s: pd.Series, decimal="."):
+    if s.dtype.kind in "if":
+        return pd.to_numeric(s, errors="coerce")
+    t = s.astype(str).str.strip().str.replace("%", "", regex=False)
+    if decimal == ",":
+        t = t.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
     else:
-        return pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
+        t = t.str.replace(",", "", regex=False)
+    return pd.to_numeric(t, errors="coerce")
 
-    # Saneos físicos
-    if "Prec" in df.columns: df["Prec"] = df["Prec"].clip(lower=0)
-    if {"TMAX","TMIN"}.issubset(df.columns):
-        m = (df["TMAX"] < df["TMIN"])
-        if m.any():
-            df.loc[m, ["TMAX","TMIN"]] = df.loc[m, ["TMIN","TMAX"]].values
+def moving_average(x: pd.Series, win=5):
+    return x.rolling(win, center=True, min_periods=1).mean()
 
-    # Orden final
-    df = df.dropna(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
-    return df[["Fecha","Julian_days","TMAX","TMIN","Prec"]]
+def percentiles_from_emerrel(emerrel: pd.Series, dates: pd.Series):
+    work = pd.DataFrame({"fecha": dates, "EMERREL": emerrel}).copy()
+    work["MA5"] = moving_average(work["EMERREL"], 5)
+    work["EMERAC"] = work["MA5"].cumsum()
+    total = float(work["EMERAC"].iloc[-1]) if len(work) else 0.0
+    if total <= 0:
+        work["EMERAC_N"] = 0.0
+        return {}, work, 0.0
+    work["EMERAC_N"] = work["EMERAC"] / total
 
-# =================== CARGA BORDE2025 (GitHub) ===================
-HIST_CSV_URL_SECRET = st.secrets.get("HIST_CSV_URL", "").strip()
-HIST_CSV_URLS: List[str] = [
-    "https://raw.githubusercontent.com/PREDWEEM/AVEFA2/main/BORDE2025.csv",
-    "https://raw.githubusercontent.com/PREDWEEM/ANN/gh-pages/BORDE2025.csv",
-    "https://PREDWEEM.github.io/ANN/BORDE2025.csv",
-]
+    def date_at(p):
+        idx = (work["EMERAC_N"] - p).abs().idxmin()
+        return pd.to_datetime(work.loc[idx, "fecha"])
 
-def _try_read_csv_semicolon_first(url: str) -> pd.DataFrame:
-    raw = _fetch_bytes(url)
-    for opt in [dict(sep=";", encoding="utf-8-sig"), dict(encoding="utf-8-sig")]:
-        try:
-            return pd.read_csv(BytesIO(raw), **opt)
-        except Exception:
-            continue
-    raise RuntimeError("No se pudo leer CSV.")
+    P = {k: date_at(k/100.0) for k in [10,25,30,40,50,60,70,80]}
+    return P, work, total
 
-@st.cache_data(ttl=900)
-def load_borde_from_github() -> pd.DataFrame:
-    urls = [HIST_CSV_URL_SECRET] if HIST_CSV_URL_SECRET else []
-    urls += HIST_CSV_URLS
-    last_err = None
-    for url in urls:
-        try:
-            df = _try_read_csv_semicolon_first(url)
-            if not df.empty: return df
-        except Exception as e:
-            last_err = e; continue
-    raise RuntimeError(f"No pude leer BORDE2025.csv (último error: {last_err})")
+# ----------------------------- ICIC (y LAI) encapsulado -----------------------------
+def compute_icic(
+    fechas: pd.Series,
+    sow_date: dt.date,
+    mode_canopy: str,
+    t_lag: int,
+    t_close: int,
+    cov_max: float,
+    lai_max: float,
+    k_beer: float,
+    alpha: float,
+    beta: float,
+    gamma: float,
+    dens: float, dens_ref: float,
+    row_cm: float, row_ref: float,
+):
+    """
+    Calcula ICIC en [0,1] sobre 'fechas' con arranque en 0 el día de la siembra.
+    Devuelve: ICIC, FC (cobertura 0–1), LAI (m²/m²).
+    ICIC = (alpha*FC + beta*F_d + gamma*F_s - offset) / (1 - offset), offset = beta*F_d + gamma*F_s
+    """
+    # Vector de días desde siembra
+    days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
 
-def _load_borde_hist() -> pd.DataFrame:
-    df_raw = load_borde_from_github()
-    df = _sanitize_generic_prefer_jd(df_raw)
-    return df[(df["Fecha"] >= HIST_START) & (df["Fecha"] <= HIST_END)].copy()
+    def logistic_between(days, start, end, y_max):
+        if end <= start:
+            end = start + 1
+        t_mid = 0.5 * (start + end)
+        r = 4.0 / max(1.0, (end - start))
+        return y_max / (1.0 + np.exp(-r * (days - t_mid)))
 
-# =================== CARGA meteo_history (GitHub o local) ===================
-@st.cache_data(ttl=900)
-def load_meteo_history_csv(url_override: str = "") -> pd.DataFrame:
-    urls: List[str] = []
-    if url_override.strip(): urls.append(_to_raw_url(url_override))
-    urls.append("https://raw.githubusercontent.com/PREDWEEM/AVEFA2/main/meteo_history.csv")
-    urls += [
-        "https://PREDWEEM.github.io/ANN/meteo_history.csv",
-        "https://raw.githubusercontent.com/PREDWEEM/ANN/gh-pages/meteo_history.csv",
-    ]
-    last_err = None
-    for url in urls:
-        try:
-            raw = _fetch_bytes(url)
-            for opt in [dict(sep=";", decimal=",", encoding="utf-8-sig"),
-                        dict(sep=";", decimal=".", encoding="utf-8-sig"),
-                        dict(sep=",", decimal=".", encoding="utf-8-sig")]:
-                try:
-                    df0 = pd.read_csv(BytesIO(raw), engine="python", **opt)
-                    df1 = _sanitize_generic_prefer_jd(df0)
-                    if not df1.empty: return df1, url
-                except Exception as e:
-                    last_err = e; continue
-        except Exception as e:
-            last_err = e; continue
-    # Fallback local
-    try:
-        p = Path("/mnt/data/meteo_history.csv")
-        if p.exists():
-            try:
-                df0 = pd.read_csv(p, sep=";", decimal=",", engine="python", encoding="utf-8-sig")
-            except Exception:
-                df0 = pd.read_csv(p, engine="python", encoding="utf-8-sig")
-            return _sanitize_generic_prefer_jd(df0), str(p)
-    except Exception as e:
-        last_err = e
-    raise RuntimeError(f"No se pudo cargar meteo_history.csv (último error: {last_err})")
-
-# =================== EMPALME ESTRICTO ===================
-
-def construir_empalme(url_override: str = "") -> pd.DataFrame:
-    # 1) Histórico: 01-ene → 03-sep (incl.)
-    df_hist = _load_borde_hist()
-    df_hist = df_hist[df_hist["Fecha"] <= HIST_END].copy()
-
-    # 2) Futuro: meteo_history desde 04-sep → último día realmente presente
-    try:
-        df_mh, used = load_meteo_history_csv(url_override)
-        st.success(f"meteo_history.csv cargado desde: {used}")
-    except Exception as e:
-        st.warning(str(e))
-        df_mh = pd.DataFrame(columns=["Fecha","Julian_days","TMAX","TMIN","Prec"])
-
-    df_mh = df_mh[df_mh["Fecha"] >= (HIST_END + pd.Timedelta(days=1))].copy()
-    end_date = df_mh["Fecha"].max() if not df_mh.empty else HIST_END
-    if pd.isna(end_date): end_date = HIST_END
-    if not df_mh.empty:
-        df_mh = df_mh[df_mh["Fecha"] <= end_date].copy()
-
-    # 3) Unir y limitar a [HIST_START, end_date]
-    df_emp = pd.concat([df_hist, df_mh], ignore_index=True)
-    if not df_emp.empty:
-        df_emp = df_emp[(df_emp["Fecha"] >= HIST_START) & (df_emp["Fecha"] <= end_date)].copy()
-        df_emp = df_emp.dropna(subset=["Fecha"]).sort_values("Fecha").reset_index(drop=True)
-
-    # 4) Diagnóstico
-    if df_mh.empty:
-        st.info("No hay días en meteo_history.csv posteriores al 2025-09-03; el empalme queda en 2025-09-03.")
-    else:
-        st.info(
-            f"Empalme: {df_emp['Fecha'].min().date()} → {df_emp['Fecha'].max().date()} "
-            f"({len(df_emp)} fila(s)). Último día leído en meteo_history.csv = {end_date.date()}."
+    if mode_canopy == "Cobertura dinámica (%)":
+        # FC directo; LAI estimado por inversión de Beer–Lambert
+        fc_dyn = np.where(
+            days_since_sow < t_lag, 0.0,
+            logistic_between(days_since_sow, t_lag, t_close, cov_max/100.0)
         )
-    return df_emp
-
-# =================== VALIDACIÓN DE CONTINUIDAD ===================
-
-def _validar_continuidad(df: pd.DataFrame, desde: pd.Timestamp, hasta: pd.Timestamp, etiqueta="Empalme"):
-    """Chequea que haya TODOS los días calendario entre 'desde' y 'hasta' (incl.)."""
-    if df.empty:
-        st.error(f"{etiqueta}: DF vacío.")
-        return
-    cal = pd.date_range(desde, hasta, freq="D")
-    present = pd.to_datetime(df["Fecha"]).dt.normalize().unique()
-    missing = [d for d in cal if d.to_datetime64() not in present]
-    if missing:
-        st.error(f"{etiqueta}: faltan {len(missing)} día(s): " +
-                 ", ".join(pd.DatetimeIndex(missing).strftime("%d-%m").tolist()))
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
+        LAI = -np.log(np.clip(1.0 - fc_dyn, 1e-9, 1.0)) / max(1e-6, k_beer)
+        LAI = np.clip(LAI, 0.0, lai_max)
     else:
-        st.success(f"{etiqueta}: secuencia completa {desde.date()} → {hasta.date()} (sin huecos).")
+        # LAI directo; FC por Beer–Lambert
+        LAI = np.where(
+            days_since_sow < t_lag, 0.0,
+            logistic_between(days_since_sow, t_lag, t_close, lai_max)
+        )
+        LAI = np.clip(LAI, 0.0, lai_max)
+        fc_dyn = 1 - np.exp(-k_beer * LAI)
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
 
-# =================== (NUEVO) CIEC TRIGO ===================
-# TT (°Cd) con reinicio en siembra, LAI trigo (ec. 16), Ciec_t (ec. 9)
+    # Factores relativos de manejo (constantes)
+    F_d = min(1.0, dens / max(1e-6, dens_ref))
+    F_s = min(1.0, row_ref / max(1e-6, row_cm))
 
-def _acum_tt(df: pd.DataFrame, tb_crop: float = 0.0, fecha_siembra=None) -> pd.Series:
-    """Acumula TT (°Cd) y reinicia a cero en la fecha de siembra si se provee."""
-    if not {"TMAX","TMIN"}.issubset(df.columns):
-        return pd.Series(np.nan, index=df.index)
-    tmean = (pd.to_numeric(df["TMAX"], errors="coerce") + pd.to_numeric(df["TMIN"], errors="coerce")) / 2.0
-    ttd = np.maximum(tmean - float(tb_crop), 0.0)
-    Dt = pd.Series(ttd, index=df.index).cumsum()
-    if fecha_siembra is not None:
-        sow = pd.to_datetime(fecha_siembra).normalize()
-        fechas = pd.to_datetime(df["Fecha"]).dt.normalize()
-        if (fechas == sow).any():
-            offset = float(Dt.loc[fechas == sow].iloc[0])
-            Dt = Dt - offset
-            Dt[Dt < 0] = 0.0
-    return Dt
+    icic_bruto = alpha * fc_dyn + beta * F_d + gamma * F_s
+    offset = beta * F_d + gamma * F_s
+    den = max(1e-6, 1.0 - offset)
+    icic = (icic_bruto - offset) / den
+    icic = np.clip(icic, 0.0, 1.0)
 
-def _lai_trigo(Dt: np.ndarray,
-               p1=0.1138, p2=3.71e-3, p3=47.98, p4=0.08012, p5=5.02e-5, p6=1.07e-8,
-               G1=1116.0, G2=2260.0) -> np.ndarray:
-    Dt = np.asarray(Dt, dtype=float)
-    lai = np.zeros_like(Dt, dtype=float)
-    idx1 = Dt < G1; idx2 = (Dt >= G1) & (Dt < G2)
-    lai[idx1] = p1*Dt[idx1] + p2*(Dt[idx1]**2)
-    lai[idx2] = p3 + p4*Dt[idx2] + p5*(Dt[idx2]**2) + p6*(Dt[idx2]**3)
-    return np.clip(lai, 0.0, None)
+    return icic, fc_dyn, LAI
 
-def _ciec(LAI_t: np.ndarray, LAIhc=6.0, Cs=200.0, Ca=200.0) -> np.ndarray:
-    ciec = (np.asarray(LAI_t, float) / float(LAIhc)) * (float(Cs) / float(Ca))
-    return np.minimum(ciec, 1.0)
+# ----------------------------- Sidebar: datos base -----------------------------
+with st.sidebar:
+    st.header("Datos de entrada")
+    up = st.file_uploader("CSV (fecha, EMERREL diaria o EMERAC)", type=["csv"])
+    url = st.text_input("…o URL raw de GitHub", placeholder="https://raw.githubusercontent.com/usuario/repo/main/emer.csv")
+    sep_opt = st.selectbox("Delimitador", ["auto", ",", ";", "\\t"], index=0)
+    dec_opt = st.selectbox("Decimal", ["auto", ".", ","], index=0)
+    dayfirst = st.checkbox("Fecha: día/mes/año (dd/mm/yyyy)", value=True)
+    is_cumulative = st.checkbox("Mi CSV es acumulado (EMERAC)", value=False)
+    as_percent = st.checkbox("Valores en % (no 0–1)", value=True)
+    dedup = st.selectbox("Si hay fechas duplicadas…", ["sumar", "promediar", "primera"], index=0)
+    fill_gaps = st.checkbox("Rellenar días faltantes con 0", value=False)
 
-# =================== SIDEBAR ===================
-
-st.sidebar.header("Opciones")
-if "cache_bust" not in st.session_state: st.session_state.cache_bust = 0
-col_a, col_b = st.sidebar.columns(2)
-with col_a:
-    if st.button("🔄 Actualizar"):
-        st.cache_data.clear(); st.session_state.cache_bust += 1; _safe_rerun()
-with col_b:
-    if st.button("🧹 Limpiar caché"):
-        st.cache_data.clear(); st.success("Caché limpiada. Volvé a correr o tocá Actualizar.")
-
-rango_opcion = st.sidebar.radio(
-    "Rango para mostrar", ["1/feb → 1/nov", "Todo el empalme"], index=0
-)
-st.sidebar.markdown("---")
-meteo_history_url_override = st.sidebar.text_input(
-    "URL de meteo_history.csv (opcional)",
-    value="https://github.com/PREDWEEM/AVEFA2/blob/main/meteo_history.csv",
-    help="Podés pegar blob o raw; se convierte a raw automáticamente."
-)
-ALPHA = st.sidebar.slider("Opacidad relleno MA5", 0.0, 1.0, 0.70, 0.05)
-# Mostrar eje Y con valores reales de la MA5 (pl·m⁻² día⁻¹)
-Y_MA5_REAL = st.sidebar.checkbox("Eje Y: mostrar valores reales de MA5 (pl·m⁻² d⁻¹)", value=False)
-
-# (NUEVO) Bloque Ciec (trigo)
-st.sidebar.markdown("---")
-st.sidebar.header("Competencia del cultivo (trigo) — Ciec")
-use_ciec = st.sidebar.checkbox("Calcular Ciec (TT→LAI→Ciec)", value=False)
-apply_ciec_to_emerrel = st.sidebar.checkbox("Ajustar EMERREL por Ciec (EMERREL×Ciec)", value=False, help="Interpreta Ciec como supervivencia de plántulas en s=1")
-Tb_crop = st.sidebar.number_input("T° base trigo (°C)", min_value=-5.0, max_value=10.0, value=0.0, step=0.5)
-Ca = st.sidebar.number_input("Ca (densidad real trigo, pl·m⁻²)", min_value=80.0, max_value=600.0, value=200.0, step=10.0)
-Cs = st.sidebar.number_input("Cs (densidad estándar trigo, pl·m⁻²)", min_value=80.0, max_value=600.0, value=200.0, step=10.0)
-LAIhc = st.sidebar.number_input("LAIhc (escenario altamente competitivo)", min_value=0.5, max_value=10.0, value=6.0, step=0.1)
-with st.sidebar.expander("Parámetros LAI (ec.16)"):
-    p1 = st.number_input("p1", value=0.1138)
-    p2 = st.number_input("p2", value=3.71e-3, format="%.6f")
-    p3 = st.number_input("p3", value=47.98)
-    p4 = st.number_input("p4", value=0.08012)
-    p5 = st.number_input("p5", value=5.02e-5, format="%.6f")
-    p6 = st.number_input("p6", value=1.07e-8, format="%.8f")
-    G1 = st.number_input("G1 (°Cd a LAI máx)", value=1116.0)
-    G2 = st.number_input("G2 (°Cd a madurez)", value=2260.0)
-# La fecha de siembra para Ciec se elige más abajo (necesita el DF empalmado para un valor por defecto)
-
-# =================== CARGA MODELO ===================
-modelo = safe_run(cargar_modelo, "No se pudieron cargar los archivos del modelo.")
-if modelo is None: st.stop()
-
-# =================== CONSTRUIR EMPALME, VALIDAR Y DIAGNOSTICAR ===================
-df_empalmado = construir_empalme(meteo_history_url_override)
-if df_empalmado.empty:
-    st.error("No hay datos tras el empalme (¿falta histórico o futuro?).")
+if up is None and not url:
+    st.info("Subí un CSV o pegá una URL para continuar.")
     st.stop()
 
-# Validaciones
-_validar_continuidad(
-    df_empalmado[df_empalmado["Fecha"] <= HIST_END],
-    HIST_START, HIST_END, etiqueta="Histórico (BORDE2025)"
-)
-mask_fut = df_empalmado["Fecha"] > HIST_END
-if mask_fut.any():
-    fut_min, fut_max = df_empalmado.loc[mask_fut, "Fecha"].min(), df_empalmado.loc[mask_fut, "Fecha"].max()
-    _validar_continuidad(
-        df_empalmado[mask_fut],
-        fut_min.normalize(), fut_max.normalize(), etiqueta="Futuro (meteo_history)"
-    )
-
-with st.expander("🔎 Diagnóstico del empalme (histórico + futuro)"):
-    def _fmt(x):
-        try: return pd.to_datetime(x).strftime("%Y-%m-%d") if pd.notna(x) else "—"
-        except Exception: return "—"
-    hist_last = df_empalmado.loc[df_empalmado["Fecha"] <= HIST_END, "Fecha"].max()
-    fut_min   = df_empalmado.loc[mask_fut, "Fecha"].min() if mask_fut.any() else pd.NaT
-    st.write("Último histórico:", _fmt(hist_last))
-    st.write("Primer futuro:", _fmt(fut_min))
-    st.write("Última fecha del empalme:", _fmt(df_empalmado["Fecha"].max()))
-    st.write("Filas empalmadas:", len(df_empalmado))
-
-# =================== PREDICCIÓN (sólo días presentes) ===================
-X_all = df_empalmado[["Julian_days","TMIN","TMAX","Prec"]].to_numpy(float)
-pred = modelo.predict(X_all, thr_bajo_medio=THR_BAJO_MEDIO, thr_medio_alto=THR_MEDIO_ALTO)
-pred["Fecha"] = df_empalmado["Fecha"].values
-pred["Julian_days"] = df_empalmado["Julian_days"].values
-
-# ======= Ciec: elegir fecha de siembra y calcular (LAI comienza en 0 ese día) =======
-fecha_siembra_ciec = None
-if use_ciec:
-    fecha_siembra_ciec = pd.to_datetime(df_empalmado["Fecha"].min()).date()
-    fecha_siembra_ciec = st.sidebar.date_input("Fecha de siembra trigo (para Ciec)", value=fecha_siembra_ciec)
-    Dt = _acum_tt(df_empalmado, tb_crop=Tb_crop, fecha_siembra=fecha_siembra_ciec)
-    LAI = _lai_trigo(Dt.values, p1,p2,p3,p4,p5,p6, G1,G2)
-    Ciec = _ciec(LAI, LAIhc=LAIhc, Cs=Cs, Ca=Ca)
-    pred["LAI_trigo"] = LAI
-    pred["Ciec_trigo"] = Ciec
-else:
-    pred["LAI_trigo"] = np.nan
-    pred["Ciec_trigo"] = np.nan
-
-# EMERREL (y ajuste opcional por Ciec)
-base_emerrel = pred["EMERREL(0-1)"].copy()
-if use_ciec and apply_ciec_to_emerrel:
-    pred["EMERREL(0-1)"] = (pred["EMERREL(0-1)"] * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
-    pred["Ajuste_Ciec_aplicado"] = True
-else:
-    pred["Ajuste_Ciec_aplicado"] = False
-
-pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
-
-# ======= Escalado "figura original": EMERREL en pl·m⁻² día⁻¹ (pico = 350) =======
-max_val = pd.to_numeric(pred["EMERREL(0-1)"], errors="coerce").max()
-scale_factor = 350.0 / max_val if pd.notna(max_val) and max_val > 0 else np.nan
-pred["EMERREL_pl_m2"] = pred["EMERREL(0-1)"].astype(float) * (scale_factor if pd.notna(scale_factor) else np.nan)
-# MA5 global (normalizada y en pl·m⁻² día⁻¹)
-pred["EMERREL_MA5"] = pred["EMERREL(0-1)"].rolling(5, min_periods=1).mean()
-pred["EMERREL_MA5_pl_m2"] = pred["EMERREL_MA5"] * (scale_factor if pd.notna(scale_factor) else np.nan)
-# Si luego ajustamos por Ciec, el mismo factor permite comparar en la misma escala (barras)
-
-
-# EMEAC (global)
-pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
-pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
-pred["EMEAC (0-1) - ajustable"] = pred["EMERREL acumulado"] / EMEAC_ADJ_DEN
-for col in ["EMEAC (0-1) - mínimo","EMEAC (0-1) - máximo","EMEAC (0-1) - ajustable"]:
-    pred[col.replace("(0-1)","(%)")] = (pred[col]*100).clip(0,100)
-
-# Recalcular niveles después del posible ajuste
-THR_BM, THR_MA = float(THR_BAJO_MEDIO), float(THR_MEDIO_ALTO)
-pred["Nivel_Emergencia_relativa"] = np.where(
-    pred["EMERREL(0-1)"] <= THR_BM, "Bajo",
-    np.where(pred["EMERREL(0-1)"] <= THR_MA, "Medio", "Alto")
-)
-
-# =================== RANGO VISUAL ===================
-if rango_opcion == "Todo el empalme":
-    pred_vis = pred.copy()
-    fi, ff = pred_vis["Fecha"].min(), pred_vis["Fecha"].max()
-    y_min = pred_vis["EMEAC (%) - mínimo"]; y_max = pred_vis["EMEAC (%) - máximo"]; y_adj = pred_vis["EMEAC (%) - ajustable"]
-    rango_txt = f"{fi.date()} → {ff.date()}"
-else:
-    years = pred["Fecha"].dt.year.unique()
-    yr = int(years[0]) if len(years)==1 else int(st.sidebar.selectbox("Año (reinicio 1/feb → 1/nov)", sorted(years)))
-    fi, ff = pd.Timestamp(yr,2,1), pd.Timestamp(yr,11,1)
-    m = (pred["Fecha"]>=fi)&(pred["Fecha"]<=ff)
-    pred_vis = pred.loc[m].copy() if m.any() else pred.copy()
-    fi = pred_vis["Fecha"].min(); ff = pred_vis["Fecha"].max()
-    pred_vis["EMERREL acumulado (reiniciado)"] = pred_vis["EMERREL(0-1)"].cumsum()
-    pred_vis["EMEAC (0-1) - mínimo (rango)"]    = pred_vis["EMERREL acumulado (reiniciado)"]/EMEAC_MIN_DEN
-    pred_vis["EMEAC (0-1) - máximo (rango)"]    = pred_vis["EMERREL acumulado (reiniciado)"]/EMEAC_MAX_DEN
-    pred_vis["EMEAC (0-1) - ajustable (rango)"] = pred_vis["EMERREL acumulado (reiniciado)"]/EMEAC_ADJ_DEN
-    for col in ["EMEAC (0-1) - mínimo (rango)","EMEAC (0-1) - máximo (rango)","EMEAC (0-1) - ajustable (rango)"]:
-        pred_vis[col.replace("(0-1)","(%)")] = (pred_vis[col]*100).clip(0,100)
-    y_min = pred_vis["EMEAC (%) - mínimo (rango)"]; y_max = pred_vis["EMEAC (%) - máximo (rango)"]; y_adj = pred_vis["EMEAC (%) - ajustable (rango)"]
-    rango_txt = "1/feb → 1/nov"
-
-# =================== GRÁFICOS ===================
-st.title("Predicción de Emergencia Agrícola AVEFA")
-
-# EMERGENCIA RELATIVA DIARIA
-st.subheader("EMERGENCIA RELATIVA DIARIA")
-# MA5 por vista y su versión en pl·m⁻²
-pred_vis["EMERREL_MA5"] = pred_vis["EMERREL(0-1)"].rolling(5, min_periods=1).mean()
-pred_vis["EMERREL_MA5_pl_m2"] = pred_vis["EMERREL_MA5"] * (scale_factor if pd.notna(scale_factor) else np.nan)
-colores_vis = pred_vis["Nivel_Emergencia_relativa"].map(COLOR_MAP).fillna("#808080").to_numpy()
-
-fig_er = go.Figure()
-if Y_MA5_REAL:
-    # --- Escala real (pl·m⁻² d⁻¹) ---
-    # Barras en pl·m⁻² d⁻¹
-    fig_er.add_bar(
-        x=pred_vis["Fecha"], y=pred_vis["EMERREL_pl_m2"],
-        marker=dict(color=colores_vis.tolist()),
-        customdata=pred_vis["Nivel_Emergencia_relativa"].map({"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}),
-        hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.1f} pl·m⁻² d⁻¹<br>Nivel: %{customdata}<extra></extra>",
-        name="EMERREL (pl·m⁻² d⁻¹)"
-    )
-    # Relleno tricolor interno bajo MA5 real
-    x = pred_vis["Fecha"]; ma_pl = pred_vis["EMERREL_MA5_pl_m2"].clip(lower=0)
-    thr_low_pl = (float(THR_BAJO_MEDIO) * scale_factor) if pd.notna(scale_factor) else np.nan
-    thr_med_pl = (float(THR_MEDIO_ALTO) * scale_factor) if pd.notna(scale_factor) else np.nan
-    y0 = np.zeros(len(ma_pl)); y1 = np.minimum(ma_pl, thr_low_pl); y2 = np.minimum(ma_pl, thr_med_pl); y3 = ma_pl
-    GREEN_RGBA  = f"rgba(0,166,81,{ALPHA})"; YELLOW_RGBA = f"rgba(255,192,0,{ALPHA})"; RED_RGBA = f"rgba(229,57,53,{ALPHA})"
-    fig_er.add_trace(go.Scatter(x=x, y=y0, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=GREEN_RGBA, hoverinfo="skip", showlegend=False, name="Zona baja (verde)"))
-    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=YELLOW_RGBA, hoverinfo="skip", showlegend=False, name="Zona media (amarillo)"))
-    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y3, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=RED_RGBA, hoverinfo="skip", showlegend=False, name="Zona alta (rojo)"))
-    fig_er.add_trace(go.Scatter(x=x, y=ma_pl, mode="lines", line=dict(width=2), name="Media móvil 5 días (pl·m⁻² d⁻¹)",
-                                hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.1f} pl·m⁻² d⁻¹<extra></extra>"))
-    # Umbrales en pl·m⁻² d⁻¹
-    if pd.notna(thr_low_pl):
-        fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_low_pl, thr_low_pl], mode="lines", line=dict(color=COLOR_MAP["Bajo"], dash="dot"), name=f"Bajo (≤ {thr_low_pl:.1f})", hoverinfo="skip"))
-    if pd.notna(thr_med_pl):
-        fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_med_pl, thr_med_pl], mode="lines", line=dict(color=COLOR_MAP["Medio"], dash="dot"), name=f"Medio (≤ {thr_med_pl:.1f})", hoverinfo="skip"))
-    fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL / MA5 (pl·m⁻² d⁻¹)", hovermode="x unified", legend_title="Referencias", height=650)
-else:
-    # --- Escala normalizada (0–1) ---
-    fig_er.add_bar(
-        x=pred_vis["Fecha"], y=pred_vis["EMERREL(0-1)"],
-        marker=dict(color=colores_vis.tolist()),
-        customdata=pred_vis["Nivel_Emergencia_relativa"].map({"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}),
-        hovertemplate="Fecha: %{x|%d-%b-%Y}<br>EMERREL: %{y:.3f}<br>Nivel: %{customdata}<extra></extra>",
-        name="EMERREL (0-1)"
-    )
-    x = pred_vis["Fecha"]; ma = pred_vis["EMERREL_MA5"].clip(lower=0)
-    thr_low, thr_med = float(THR_BAJO_MEDIO), float(THR_MEDIO_ALTO)
-    y0 = np.zeros(len(ma)); y1 = np.minimum(ma, thr_low); y2 = np.minimum(ma, thr_med); y3 = ma
-    GREEN_RGBA  = f"rgba(0,166,81,{ALPHA})"; YELLOW_RGBA = f"rgba(255,192,0,{ALPHA})"; RED_RGBA = f"rgba(229,57,53,{ALPHA})"
-    fig_er.add_trace(go.Scatter(x=x, y=y0, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=GREEN_RGBA, hoverinfo="skip", showlegend=False, name="Zona baja (verde)"))
-    fig_er.add_trace(go.Scatter(x=x, y=y1, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=YELLOW_RGBA, hoverinfo="skip", showlegend=False, name="Zona media (amarillo)"))
-    fig_er.add_trace(go.Scatter(x=x, y=y2, mode="lines", line=dict(width=0), hoverinfo="skip", showlegend=False))
-    fig_er.add_trace(go.Scatter(x=x, y=y3, mode="lines", line=dict(width=0), fill="tonexty", fillcolor=RED_RGBA, hoverinfo="skip", showlegend=False, name="Zona alta (rojo)"))
-    fig_er.add_trace(go.Scatter(x=x, y=ma, mode="lines", line=dict(width=2), name="Media móvil 5 días",
-                                hovertemplate="Fecha: %{x|%d-%b-%Y}<br>MA5: %{y:.3f}<extra></extra>"))
-    fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_low, thr_low], mode="lines", line=dict(color=COLOR_MAP["Bajo"], dash="dot"), name=f"Bajo (≤ {thr_low:.3f})", hoverinfo="skip"))
-    fig_er.add_trace(go.Scatter(x=[x.min(), x.max()], y=[thr_med, thr_med], mode="lines", line=dict(color=COLOR_MAP["Medio"], dash="dot"), name=f"Medio (≤ {thr_med:.3f})", hoverinfo="skip"))
-    fig_er.add_trace(go.Scatter(x=[None], y=[None], mode="lines", line=dict(color=COLOR_MAP["Alto"], dash="dot"), name=f"Alto (> {thr_med:.3f})", hoverinfo="skip"))
-    fig_er.update_layout(xaxis_title="Fecha", yaxis_title="EMERREL (0-1)", hovermode="x unified", legend_title="Referencias", height=650)
-
-fi, ff = pred_vis["Fecha"].min(), pred_vis["Fecha"].max()
-fig_er.update_xaxes(range=[fi, ff], dtick="D1" if (ff-fi).days <= 31 else "M1", tickformat="%d-%b" if (ff-fi).days <= 31 else "%b")
-fig_er.update_yaxes(rangemode="tozero")
-st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
-
-# ======= Gráfico combinado solicitado =======
-st.subheader("EMERREL normalizada y en pl·m⁻², con Ciec/ICIC opcionales (eje secundario)")
+# ----------------------------- Carga y parseo -----------------------------
 try:
-    fig_all = go.Figure()
+    raw = read_raw(up, url)
+    if not raw or len(raw) == 0:
+        st.error("El archivo/URL está vacío.")
+        st.stop()
+    df0, meta = parse_csv(raw, sep_opt, dec_opt)
+    if df0.empty:
+        st.error("El CSV no tiene filas.")
+        st.stop()
+    st.success(f"CSV leído. sep='{meta['sep']}' dec='{meta['dec']}' enc='{meta['enc']}'")
+except (URLError, HTTPError) as e:
+    st.error(f"No se pudo acceder a la URL: {e}")
+    st.stop()
+except Exception as e:
+    st.error(f"No se pudo leer el CSV: {e}")
+    st.stop()
 
-    # --- BARRAS en eje primario (densidad pl·m⁻² día⁻¹) ---
-    fig_all.add_bar(x=pred["Fecha"], y=pred["EMERREL_pl_m2"], name="EMERREL (pl·m⁻² día⁻¹)", opacity=0.35, yaxis="y1")
-    if use_ciec:
-        emerrel_x_ciec = (base_emerrel * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
-        emerrel_x_ciec_plm2 = emerrel_x_ciec.astype(float) * (scale_factor if pd.notna(scale_factor) else np.nan)
-        fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec_plm2, name="EMERREL×Ciec (pl·m⁻² día⁻¹)", opacity=0.65, yaxis="y1")
+st.subheader("Vista previa (primeras 15 filas del CSV)")
+st.dataframe(df0.head(15), use_container_width=True)
 
-    # --- LÍNEAS en eje secundario (0–1) ---
-    # EMERREL normalizada (0-1) como línea para comparar forma
-    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=base_emerrel, mode="lines", name="EMERREL (0–1)", yaxis="y2"))
-    if use_ciec:
-        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0–1)", yaxis="y2"))
-    if use_icic:
-        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0–1)", yaxis="y2"))
+# ----------------------------- Selección de columnas -----------------------------
+cols = list(df0.columns)
+with st.expander("Seleccionar columnas y depurar datos", expanded=True):
+    c_fecha = st.selectbox("Columna de fecha", cols, index=0)
+    c_valor = st.selectbox("Columna de valor (EMERREL diaria o EMERAC)", cols, index=1 if len(cols)>1 else 0)
 
-    # Layout de doble eje
-    # Añadimos MA5 real en eje izquierdo
-fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["EMERREL_MA5_pl_m2"], mode="lines", name="MA5 (pl·m⁻² d⁻¹)", yaxis="y1"))
-fig_all.update_layout(
-    hovermode="x unified",
-    height=560,
-    legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
-    xaxis=dict(title="Fecha"),
-    yaxis=dict(title="Densidad diaria (pl·m⁻² día⁻¹)", rangemode="tozero"),
-    yaxis2=dict(title="Valores normalizados (0–1)", overlaying='y', side='right', range=[0,1])
+    fechas = pd.to_datetime(df0[c_fecha], dayfirst=dayfirst, errors="coerce")
+    sample_str = df0[c_valor].astype(str).head(200).str.cat(sep=" ")
+    dec_for_col = "," if (sample_str.count(",")>sample_str.count(".") and re.search(r",\d", sample_str)) else "."
+    vals = clean_numeric_series(df0[c_valor], decimal=dec_for_col)
+
+    df = pd.DataFrame({"fecha": fechas, "valor": vals}).dropna().sort_values("fecha").reset_index(drop=True)
+
+    if df.empty:
+        st.error("Tras el parseo no quedaron filas válidas (fechas/valores NaN).")
+        st.stop()
+
+    if df["fecha"].duplicated().any():
+        if dedup == "sumar":
+            df = df.groupby("fecha", as_index=False)["valor"].sum()
+        elif dedup == "promediar":
+            df = df.groupby("fecha", as_index=False)["valor"].mean()
+        else:
+            df = df.drop_duplicates(subset=["fecha"], keep="first")
+
+    if fill_gaps and len(df) > 1:
+        full_idx = pd.date_range(df["fecha"].min(), df["fecha"].max(), freq="D")
+        df = df.set_index("fecha").reindex(full_idx).rename_axis("fecha").reset_index()
+        df["valor"] = df["valor"].fillna(0.0)
+
+    emerrel = df["valor"].astype(float)
+    if as_percent:
+        emerrel = emerrel / 100.0
+    if is_cumulative:
+        emerrel = emerrel.diff().fillna(0.0).clip(lower=0.0)
+    emerrel = emerrel.clip(lower=0.0)
+
+    df_plot = pd.DataFrame({"fecha": pd.to_datetime(df["fecha"]), "EMERREL": emerrel})
+
+# ----------------------------- Siembra & parámetros ICIC -----------------------------
+years = df_plot["fecha"].dt.year.dropna().astype(int)
+year_ref = int(years.mode().iloc[0]) if len(years) else dt.date.today().year
+sow_min = dt.date(year_ref, 5, 1)
+sow_max = dt.date(year_ref, 7, 1)
+
+with st.sidebar:
+    st.header("Siembra & ICIC")
+    st.caption(f"Ventana de siembra: **{sow_min} → {sow_max}**")
+    sow_date = st.date_input("Fecha de siembra", value=sow_min, min_value=sow_min, max_value=sow_max)
+    mode_canopy = st.selectbox("Canopia", ["Cobertura dinámica (%)", "LAI dinámico"], index=0)
+    t_lag = st.number_input("Días a emergencia del cultivo (lag)", 0, 60, 7, 1)
+    t_close = st.number_input("Días a cierre de entresurco", 10, 120, 45, 1)
+    cov_max = st.number_input("Cobertura máxima (%)", 10.0, 100.0, 85.0, 1.0)
+    lai_max = st.number_input("LAI máximo", 0.0, 8.0, 3.5, 0.1)
+    k_beer = st.number_input("k (Beer–Lambert)", 0.1, 1.2, 0.6, 0.05)
+    dens = st.number_input("Densidad cultivo (pl/m²)", 20, 700, 250, 10)
+    dens_ref = st.number_input("Densidad ref (pl/m²)", 20, 700, 250, 10)
+    row_cm = st.number_input("Entre-hileras (cm)", 10, 60, 19, 1)
+    row_ref = st.number_input("Entre-hileras ref (cm)", 10, 60, 19, 1)
+    alpha = st.slider("α (peso canopia)", 0.0, 1.0, 0.60, 0.05)
+    beta  = st.slider("β (densidad)",     0.0, 1.0, 0.25, 0.05)
+    gamma = st.slider("γ (entrehileras)", 0.0, 1.0, 0.15, 0.05)
+    theta = st.slider("Umbral ICIC (θ)", 0.2, 0.9, 0.6, 0.05)
+
+# ----------------------------- Sidebar: Ciec -----------------------------
+with st.sidebar:
+    st.header("Ciec (competencia del cultivo)")
+    use_ciec = st.checkbox("Calcular y mostrar Ciec", value=True)
+    Ca = st.number_input("Densidad real Ca (pl/m²)", 50, 700, 250, 10)
+    Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
+    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 6.0, 0.1)
+
+# Toggle etiquetas y escala Plantas·m²
+with st.sidebar:
+    st.header("Etiquetas y escalas")
+    highlight_labels = st.checkbox("Etiquetas destacadas en bandas", value=True)
+    show_plants_axis = st.checkbox("Mostrar segunda escala derecha en Plantas·m²", value=True)
+    st.header("Visualización avanzada")
+    show_emac_curve_raw = st.checkbox("Mostrar EMERAC (curva) cruda", value=False)
+    show_emac_curve_adj = st.checkbox("Mostrar EMERAC (curva) ajustada", value=False)
+    show_emac_points_raw = st.checkbox("Mostrar EMERAC (puntos) cruda", value=False)
+    show_emac_points_adj = st.checkbox("Mostrar EMERAC (puntos) ajustada", value=False)
+    show_nonres_bands = st.checkbox("Marcar bandas 1 día en no residuales", value=True)
+    # NUEVOS toggles de barras en Plantas·m²
+    show_ciec_density = st.checkbox("Mostrar EMERREL×Ciec en Plantas·m² (barras)", value=False)
+    show_icic_density = st.checkbox("Mostrar EMERREL_eff (ICIC) en Plantas·m² (barras)", value=False)
+
+if not (sow_min <= sow_date <= sow_max):
+    st.error("La fecha de siembra debe estar entre el 1 de mayo y el 1 de julio.")
+    st.stop()
+
+# ----------------------------- ICIC (usando función) + Ciec -----------------------------
+ICIC, FC, LAI = compute_icic(
+    fechas=df_plot["fecha"],
+    sow_date=sow_date,
+    mode_canopy=mode_canopy,
+    t_lag=int(t_lag), t_close=int(t_close),
+    cov_max=float(cov_max), lai_max=float(lai_max), k_beer=float(k_beer),
+    alpha=float(alpha), beta=float(beta), gamma=float(gamma),
+    dens=float(dens), dens_ref=float(dens_ref),
+    row_cm=float(row_cm), row_ref=float(row_ref),
 )
-st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
-except Exception as e:
-    st.warning(f"No se pudo renderizar el gráfico combinado (versiones + ejes): {e}")
-except Exception as e:
-    st.warning(f"No se pudo renderizar el gráfico combinado (EMERREL×Ciec/ICIC). Detalle: {e}")
-except Exception as e:
-    st.warning(f"No se pudo renderizar el gráfico combinado (error: {e})")
 
-# (NUEVO) Panel combinado: EMERREL, EMERREL ajustada, Ciec, ICIC
+# Ciec(t)
 if use_ciec:
-    st.subheader("Competencia y emergencia (Ciec + ICIC + EMERREL)")
-    figc = go.Figure()
-    # Curvas EMERREL
-    figc.add_trace(go.Scatter(x=pred["Fecha"], y=base_emerrel, name="EMERREL original", mode="lines", line=dict(color="#1f77b4")))
-    if apply_ciec_to_emerrel:
-        figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["EMERREL(0-1)"], name="EMERREL × Ciec", mode="lines", line=dict(color="#ff7f0e")))
-    # Curva Ciec
-    figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], name="Ciec_t (0-1)", mode="lines", line=dict(dash="dot", color="#2ca02c")))
-    # ICIC si existe en pred
-    if "M_t" in pred.columns:
-        figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["M_t"], name="ICIC M_t (0-1)", mode="lines", line=dict(dash="dash", color="#d62728")))
-    # Línea vertical de siembra
-    try:
-        figc.add_vline(x=pd.to_datetime(fecha_siembra_ciec), line_dash="dot", line_color="#555", annotation_text="Siembra", annotation_position="top left")
-    except Exception:
-        pass
-    figc.update_layout(height=600, margin=dict(l=10,r=10,t=30,b=10), legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
-    st.plotly_chart(figc, use_container_width=True, theme="streamlit")
-
-# EMERGENCIA ACUMULADA
-st.subheader("EMERGENCIA ACUMULADA DIARIA")
-if rango_opcion == "Todo el empalme":
-    y_min = pred_vis["EMEAC (%) - mínimo"]; y_max = pred_vis["EMEAC (%) - máximo"]; y_adj = pred_vis["EMEAC (%) - ajustable"]
+    Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / max(1e-6, float(Ca)))
+    Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
-    y_min = pred_vis["EMEAC (%) - mínimo (rango)"]; y_max = pred_vis["EMEAC (%) - máximo (rango)"]; y_adj = pred_vis["EMEAC (%) - ajustable (rango)"]
+    Ciec = np.full_like(ICIC, np.nan, dtype=float)
 
+df_ic = pd.DataFrame({"fecha": df_plot["fecha"], "ICIC": ICIC, "Ciec": Ciec})
+t_star = df_ic.loc[df_ic["ICIC"] >= theta, "fecha"].min() if (df_ic["ICIC"] >= theta).any() else None
+
+# Serie efectiva (visual) por ICIC (aplica desde t*)
+df_eff = df_plot.copy()
+if t_star is not None:
+    mask = df_eff["fecha"] >= t_star
+    df_eff["EMERREL_eff"] = df_eff["EMERREL"].where(~mask, df_eff["EMERREL"]*(1 - df_ic["ICIC"].values))
+else:
+    df_eff["EMERREL_eff"] = df_eff["EMERREL"]
+
+# Percentiles y acumuladas (base/ajustada)
+P_base, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
+P_star, work_star, tot_star = percentiles_from_emerrel(df_eff["EMERREL_eff"], df_eff["fecha"])
+
+# ----------------------------- Conversión EMERREL → Plantas·m² (pico ≙ 350) -----------------------------
+pico = float(df_plot["EMERREL"].max())
+if pico > 0:
+    factor = 350.0 / pico
+    plantas_cruda = (df_plot["EMERREL"] * factor).values
+    plantas_eff   = (df_eff["EMERREL_eff"] * factor).values
+    conv_caption = f"Conversión: pico EMERREL={pico:.4f} → 350 pl·m² ⇒ factor={factor:.2f} pl·m² por unidad EMERREL"
+else:
+    factor = None
+    plantas_cruda = np.full(len(df_plot), np.nan)
+    plantas_eff   = np.full(len(df_plot), np.nan)
+    conv_caption = "No se pudo calcular Plantas·m² (pico EMERREL = 0)."
+
+# ---- EMERREL × Ciec (normalizado) y en Plantas·m² ----
+emerrel_x_ciec = (df_plot["EMERREL"].astype(float).values * Ciec).clip(min=0.0) if use_ciec else np.full(len(df_plot), np.nan)
+plantas_x_ciec = (emerrel_x_ciec * factor) if (factor and use_ciec) else np.full(len(df_plot), np.nan)
+
+# ----------------------------- Cronograma -----------------------------
+sched_rows = []
+def add_sched(nombre, fecha_ini, dias_res=None, nota=""):
+    if not fecha_ini: return
+    fin = (pd.to_datetime(fecha_ini) + pd.Timedelta(days=int(dias_res))).date() if dias_res else None
+    sched_rows.append({"Intervención": nombre, "Inicio": str(fecha_ini), "Fin": str(fin) if fin else "—", "Nota": nota})
+
+with st.sidebar:
+    st.header("Manejo pre-siembra (manual)")
+    min_date = df_plot["fecha"].min().date()
+    max_date = df_plot["fecha"].max().date()
+    pre_glifo = st.checkbox("Herbicida total (glifosato)", value=False)
+    pre_glifo_date = st.date_input("Fecha glifosato (pre)", value=min_date, min_value=min_date, max_value=max_date, disabled=not pre_glifo)
+
+    pre_selNR = st.checkbox("Selectivo no residual (pre)", value=False)
+    pre_selNR_date = st.date_input("Fecha selectivo no residual (pre)", value=min_date, min_value=min_date, max_value=max_date, disabled=not pre_selNR)
+
+    pre_selR  = st.checkbox("Selectivo + residual (pre)", value=False)
+    pre_res_dias = st.slider("Residualidad pre (días)", 30, 60, 45, 1, disabled=not pre_selR)
+    pre_selR_date = st.date_input("Fecha selectivo + residual (pre)", value=min_date, min_value=min_date, max_value=max_date, disabled=not pre_selR)
+
+    st.header("Manejo post-emergencia (manual)")
+    post_gram = st.checkbox("Selectivo graminicida (post)", value=False)
+    post_gram_date = st.date_input("Fecha graminicida (post)", value=max(min_date, sow_date), min_value=min_date, max_value=max_date, disabled=not post_gram)
+
+    post_selR = st.checkbox("Selectivo + residual (post)", value=False)
+    post_res_dias = st.slider("Residualidad post (días)", 30, 60, 45, 1, disabled=not post_selR)
+    post_selR_date = st.date_input("Fecha selectivo + residual (post)", value=max(min_date, sow_date), min_value=min_date, max_value=max_date, disabled=not post_selR)
+
+# Validaciones suaves
+warnings = []
+def check_pre(date_val, name):
+    if date_val and date_val > sow_date:
+        warnings.append(f"{name}: debería ser ≤ fecha de siembra ({sow_date}).")
+def check_post(date_val, name):
+    if date_val and date_val < sow_date:
+        warnings.append(f"{name}: debería ser ≥ fecha de siembra ({sow_date}).")
+
+if pre_glifo:  check_pre(pre_glifo_date, "Glifosato (pre)")
+if pre_selNR:  check_pre(pre_selNR_date, "Selectivo no residual (pre)")
+if pre_selR:   check_pre(pre_selR_date, "Selectivo + residual (pre)")
+if post_gram:  check_post(post_gram_date, "Graminicida (post)")
+if post_selR:  check_post(post_selR_date, "Selectivo + residual (post)")
+
+for w in warnings:
+    st.warning(w)
+
+# Agendar
+if pre_glifo: add_sched("Pre · glifosato (NSr)", pre_glifo_date, None, "Barbecho")
+if pre_selNR: add_sched("Pre · selectivo no residual", pre_selNR_date, None, "Primer flush")
+if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
+if post_gram: add_sched("Post · graminicida selectivo", post_gram_date, None, "Cohorte principal")
+if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias} días")
+
+sched = pd.DataFrame(sched_rows)
+
+# ----------------------------- Gráfico -----------------------------
 fig = go.Figure()
-fig.add_trace(go.Scatter(x=pred_vis["Fecha"], y=y_max, mode="lines", line=dict(width=0), name="Máximo", hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Máximo: %{y:.1f}%<extra></extra>"))
-fig.add_trace(go.Scatter(x=pred_vis["Fecha"], y=y_min, mode="lines", line=dict(width=0), fill="tonexty", name="Mínimo", hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Mínimo: %{y:.1f}%<extra></extra>"))
-fig.add_trace(go.Scatter(x=pred_vis["Fecha"], y=y_adj, mode="lines", line=dict(width=2.5), name=f"Umbral ajustable (/{EMEAC_ADJ_DEN:.2f})", hovertemplate="Fecha: %{x|%d-%b-%Y}<br>Ajustable: %{y:.1f}%<extra></extra>"))
-for nivel in [25, 50, 75, 90]:
-    try:
-        fig.add_hline(y=nivel, line_dash="dash", opacity=0.6, annotation_text=f"{nivel}%")
-    except Exception:
-        fig.add_trace(go.Scatter(x=[pred_vis["Fecha"].min(), pred_vis["Fecha"].max()], y=[nivel, nivel], mode="lines", line=dict(dash="dash"), showlegend=False))
-fig.update_layout(xaxis_title="Fecha", yaxis_title="EMEAC (%)", yaxis=dict(range=[0, 100]), hovermode="x unified", legend_title="Referencias", height=600)
-fig.update_xaxes(range=[fi, ff], dtick="D1" if (ff-fi).days <= 31 else "M1", tickformat="%d-%b" if (ff-fi).days <= 31 else "%b")
-st.plotly_chart(fig, use_container_width=True, theme="streamlit")
 
-# =================== TABLA & DESCARGA ===================
-st.subheader(f"Resultados ({'1/feb → 1/nov' if rango_opcion!='Todo el empalme' else f'{fi.date()} → {ff.date()}'}) - Histórico GitHub + meteo_history.csv")
-col_emeac = "EMEAC (%) - ajustable" if rango_opcion == "Todo el empalme" else "EMEAC (%) - ajustable (rango)"
-nivel_icono = {"Bajo":"🟢 Bajo","Medio":"🟡 Medio","Alto":"🔴 Alto"}
-cols_base = ["Fecha","Julian_days","Nivel_Emergencia_relativa",col_emeac]
-tabla = pred_vis[cols_base].copy()
-tabla["Nivel de EMERREL"] = tabla["Nivel_Emergencia_relativa"].map(nivel_icono).fillna("🟢 Bajo")
-tabla = tabla.rename(columns={col_emeac:"EMEAC (%)"})
-tabla["EMEAC (%)"] = pd.to_numeric(tabla["EMEAC (%)"], errors="coerce").fillna(0).clip(0,100)
+# Customdata para tooltips (Plantas·m²)
+cd_cruda = np.column_stack([plantas_cruda])
+cd_eff   = np.column_stack([plantas_eff])
+cd_x_ciec = np.column_stack([plantas_x_ciec])
 
-# Añadir columnas Ciec si se activó
+# EMERREL (izquierda) con tooltips mostrando EMERREL y Plantas·m²
+fig.add_trace(go.Scatter(
+    x=df_plot["fecha"], y=df_plot["EMERREL"], mode="lines",
+    name="EMERREL (cruda)",
+    customdata=cd_cruda,
+    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL: %{y:.4f}<br>Plantas·m² (est): %{customdata[0]:.1f}<extra></extra>"
+))
+fig.add_trace(go.Scatter(
+    x=df_eff["fecha"], y=df_eff["EMERREL_eff"], mode="lines",
+    name="EMERREL (efectiva · ICIC)", line=dict(dash="dot"),
+    customdata=cd_eff,
+    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL (ef): %{y:.4f}<br>Plantas·m² (ef): %{customdata[0]:.1f}<extra></extra>"
+))
+# EMERREL × Ciec (línea)
 if use_ciec:
-    add_cols = ["Fecha","Ciec_trigo","LAI_trigo","Ajuste_Ciec_aplicado"]
-    tabla = tabla.merge(pred[add_cols], on="Fecha", how="left")
+    fig.add_trace(go.Scatter(
+        x=df_plot["fecha"], y=emerrel_x_ciec, mode="lines",
+        name="EMERREL × Ciec", line=dict(dash="dashdot"),
+        customdata=cd_x_ciec,
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL×Ciec: %{y:.4f}<br>Plantas·m² (×Ciec): %{customdata[0]:.1f}<extra></extra>"
+    ))
 
-st.dataframe(tabla.sort_values("Fecha").reset_index(drop=True), use_container_width=True)
+# ICIC / Ciec / EMERAC → eje derecho interno (yaxis3) o derecho (yaxis2) según haya eje de plantas
+def add_icic_emac_traces(to_yaxis="y3"):
+    # ICIC
+    fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["ICIC"], mode="lines",
+                             name="ICIC", yaxis=to_yaxis))
+    # Ciec
+    if use_ciec:
+        fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["Ciec"], mode="lines",
+                                 name="Ciec", yaxis=to_yaxis))
+    # EMERAC opcionales
+    if len(work_base):
+        if st.session_state.get("show_emac_curve_raw", None) is None:
+            pass
+    if 'show_emac_curve_raw' in locals() and show_emac_curve_raw and len(work_base):
+        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="lines",
+                                 name="EMERAC (curva) cruda", yaxis=to_yaxis))
+    if 'show_emac_curve_adj' in locals() and show_emac_curve_adj and len(work_star):
+        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="lines",
+                                 name="EMERAC (curva) ajustada", yaxis=to_yaxis, line=dict(dash="dash")))
+    if 'show_emac_points_raw' in locals() and show_emac_points_raw and len(work_base):
+        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="markers",
+                                 name="EMERAC (puntos) cruda", yaxis=to_yaxis, marker=dict(size=6)))
+    if 'show_emac_points_adj' in locals() and show_emac_points_adj and len(work_star):
+        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="markers",
+                                 name="EMERAC (puntos) ajustada", yaxis=to_yaxis, marker=dict(size=6, symbol="x")))
 
-buf = StringIO(); tabla.to_csv(buf, index=False)
-st.download_button(
-    f"Descargar resultados ({'todo' if rango_opcion=='Todo el empalme' else 'rango'})",
-    data=buf.getvalue(), file_name=f"AVEFA_resultados_{'todo' if rango_opcion=='Todo el empalme' else 'rango'}.csv",
-    mime="text/csv"
+# Sombrear t*
+if t_star is not None:
+    fig.add_vrect(x0=t_star, x1=df_plot["fecha"].max(), fillcolor="LightGreen", opacity=0.15,
+                  line_width=0, annotation_text="Impacto ICIC≥θ", annotation_position="top left")
+
+# --- Helpers de bandas con opcional "etiquetas destacadas" ---
+def _add_label(center_ts, text, bgcolor, y=0.98):
+    fig.add_annotation(
+        x=center_ts, y=y, xref="x", yref="paper",
+        text=text, showarrow=False,
+        bgcolor=bgcolor, opacity=0.9,
+        bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2
+    )
+
+def add_residual_band(start_date, days, label):
+    if start_date is None or days is None:
+        return
+    try:
+        d_int = int(days)
+        if d_int <= 0:
+            return
+        x0 = pd.to_datetime(start_date)
+        x1 = x0 + pd.Timedelta(days=d_int)
+        fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="PaleVioletRed", opacity=0.15)
+        if highlight_labels:
+            _add_label(x0 + (x1 - x0)/2, label, "rgba(219,112,147,0.8)")
+    except Exception:
+        return
+
+def add_one_day_band(date_val, label):
+    if date_val is None:
+        return
+    try:
+        x0 = pd.to_datetime(date_val)
+        x1 = x0 + pd.Timedelta(days=1)
+        fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="Gold", opacity=0.25)
+        if highlight_labels:
+            _add_label(x0 + (x1 - x0)/2, label, "rgba(255,215,0,0.85)")
+    except Exception:
+        return
+
+# Residuales
+if 'pre_selR' in locals() and pre_selR:
+    add_residual_band(pre_selR_date, pre_res_dias, f"Residual pre {pre_res_dias}d")
+if 'post_selR' in locals() and post_selR:
+    add_residual_band(post_selR_date, post_res_dias, f"Residual post {post_res_dias}d")
+
+# No residuales (1 día)
+if show_nonres_bands:
+    if 'pre_glifo' in locals() and pre_glifo:
+        add_one_day_band(pre_glifo_date, "Glifo (1d)")
+    if 'pre_selNR' in locals() and pre_selNR:
+        add_one_day_band(pre_selNR_date, "Sel. NR (1d)")
+    if 'post_gram' in locals() and post_gram:
+        add_one_day_band(post_gram_date, "Graminicida (1d)")
+
+# ----------------------------- Ejes y escalas -----------------------------
+# Eje izquierdo (y): EMERREL
+ymax = max(1e-6, float(df_plot["EMERREL"].max()) * 1.15)
+
+layout_kwargs = dict(
+    margin=dict(l=10, r=10, t=40, b=10),
+    title="EMERREL + ICIC + Ciec con manejo MANUAL (bandas no residuales = 1 día)",
+    xaxis_title="Fecha",
+    yaxis_title="EMERREL",
+    yaxis=dict(range=[0, ymax])
 )
 
+# Eje plantas y eje ICIC/Ciec/EMERAC
+if show_plants_axis and factor:
+    plantas_max = float(np.nanmax([np.nanmax(plantas_cruda), np.nanmax(plantas_eff), np.nanmax(plantas_x_ciec)]))
+    if not np.isfinite(plantas_max) or plantas_max <= 0:
+        plantas_max = 1.0
+
+    # y2: Plantas·m² (derecha)
+    layout_kwargs["yaxis2"] = dict(
+        overlaying="y", side="right", title="Plantas·m² (estimadas)", position=1.0,
+        range=[0, plantas_max*1.15]
+    )
+    # Trazo "fantasma" para fijar escala
+    fig.add_trace(go.Scatter(
+        x=df_plot["fecha"], y=plantas_cruda,
+        name="Plantas·m² (escala)", yaxis="y2",
+        line=dict(width=0.1), opacity=0.0, showlegend=False, hoverinfo="skip"
+    ))
+
+    # y3: ICIC / Ciec / EMERAC (0–1)
+    layout_kwargs["yaxis3"] = dict(
+        overlaying="y", side="right", title="ICIC / Ciec / EMERAC (0–1)", position=0.97, range=[0, 1]
+    )
+    add_icic_emac_traces(to_yaxis="y3")
+
+    # Barras opcionales en Plantas·m²
+    if use_ciec and show_ciec_density:
+        fig.add_bar(
+            x=df_plot["fecha"], y=plantas_x_ciec,
+            name="Plantas·m² × Ciec", yaxis="y2", opacity=0.35, legendgroup="densidad"
+        )
+    if show_icic_density:
+        cd_eff_bar = np.column_stack([df_eff["EMERREL_eff"].values])
+        fig.add_bar(
+            x=df_eff["fecha"], y=plantas_eff,
+            name="Plantas·m² (ef · ICIC)",
+            yaxis="y2", opacity=0.35, legendgroup="densidad",
+            customdata=cd_eff_bar,
+            hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (ef): %{y:.1f}<br>EMERREL_eff: %{customdata[0]:.4f}<extra></extra>"
+        )
+else:
+    # Sin eje plantas: ICIC/Ciec/EMERAC en y2
+    layout_kwargs["yaxis2"] = dict(overlaying="y", side="right", title="ICIC / Ciec / EMERAC (0–1)", range=[0, 1])
+    add_icic_emac_traces(to_yaxis="y2")
+
+fig.update_layout(**layout_kwargs)
+st.plotly_chart(fig, use_container_width=True)
+st.caption(conv_caption)
+
+# ----------------------------- Tablas & descarga -----------------------------
+st.subheader("Cronograma de manejo (manual)")
+if len(sched):
+    st.dataframe(sched, use_container_width=True)
+    st.download_button("Descargar cronograma (CSV)", sched.to_csv(index=False).encode("utf-8"),
+                       "cronograma_manejo_manual.csv", "text/csv")
+else:
+    st.info("Activa alguna intervención y define la(s) fecha(s).")
+
+# ----------------------------- Descargas de series (conversión anclada al pico) -----------------------------
+out = df_plot.copy()
+out["EMERREL_eff"] = df_eff["EMERREL_eff"]
+out["EMERREL_x_Ciec"] = emerrel_x_ciec
+if factor:
+    out["Plantas_m2_est_cruda"] = np.round(plantas_cruda, 1)
+    out["Plantas_m2_est_ef"]    = np.round(plantas_eff, 1)
+    out["Plantas_m2_est_xCiec"] = np.round(plantas_x_ciec, 1)
+else:
+    out["Plantas_m2_est_cruda"] = np.nan
+    out["Plantas_m2_est_ef"]    = np.nan
+    out["Plantas_m2_est_xCiec"] = np.nan
+
+with st.expander("Descargas de series", expanded=True):
+    st.caption(conv_caption)
+    only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m²", value=False)
+
+    default_cols = ["fecha", "EMERREL", "EMERREL_eff", "EMERREL_x_Ciec",
+                    "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_xCiec"]
+    available_cols = [c for c in default_cols if c in out.columns] + [c for c in out.columns if c not in default_cols]
+    preselect = [c for c in available_cols if c.startswith("Plantas_m2")] if only_plants else [c for c in available_cols if c in default_cols]
+    selected_cols = st.multiselect("Columnas a incluir en la tabla y el CSV:", available_cols, default=preselect)
+
+    if not selected_cols:
+        st.info("Seleccioná al menos una columna para mostrar/descargar.")
+        selected_cols = preselect or available_cols
+
+    st.dataframe(out[selected_cols].tail(20), use_container_width=True)
+    st.download_button("Descargar serie procesada (CSV)",
+                       out[selected_cols].to_csv(index=False).encode("utf-8"),
+                       "serie_procesada.csv", "text/csv")
+
+# ----------------------------- Diagnóstico -----------------------------
+st.subheader("Diagnóstico")
+diag = {
+    "siembra": str(sow_date),
+    "t_impacto_ICIC": str(pd.to_datetime(t_star).date()) if t_star is not None else None,
+    "suma_EMERREL": float(df_plot["EMERREL"].sum()),
+    "suma_EMERREL_ef": float(df_eff["EMERREL_eff"].sum()),
+    "sum_EMERREL_x_Ciec": float(np.nansum(emerrel_x_ciec)),
+    "tot_base": float(tot_base),
+    "tot_ajustada": float(tot_star),
+    "pico_EMERREL": float(df_plot["EMERREL"].max()),
+    "factor_pl_m2_por_EMERREL": (350.0 / float(df_plot["EMERREL"].max())) if float(df_plot["EMERREL"].max()) > 0 else None,
+    "ICIC_sowing_day": float(ICIC[0]) if len(ICIC) else None
+}
+st.code(json.dumps(diag, ensure_ascii=False, indent=2))
