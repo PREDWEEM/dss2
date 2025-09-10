@@ -5,8 +5,8 @@
 # - Lectura determinista por JD/Julian_days en ambos archivos (evita ambigüedades de formato)
 # - Sin calendarizar ni interpolar días faltantes; la RN se alimenta SOLO con días existentes
 # - Validador de continuidad (histórico y futuro)
-# - NUEVO: Cálculo de TT → LAI_trigo (ec.16) → Ciec_t (ec.9) y ajuste opcional de EMERREL por supervivencia
-#          (EMERREL_ajustada = EMERREL * Ciec cuando se activa la opción)
+# - NUEVO: Cálculo de TT → LAI_trigo (ec.16) → Ciec_t (ec.9) con **Dt reiniciado en siembra** y
+#          ajuste opcional de EMERREL por supervivencia (EMERREL_ajustada = EMERREL × Ciec)
 
 import streamlit as st
 import numpy as np
@@ -317,14 +317,23 @@ def _validar_continuidad(df: pd.DataFrame, desde: pd.Timestamp, hasta: pd.Timest
         st.success(f"{etiqueta}: secuencia completa {desde.date()} → {hasta.date()} (sin huecos).")
 
 # =================== (NUEVO) CIEC TRIGO ===================
-# TT (°Cd), LAI trigo (ec. 16), Ciec_t (ec. 9)
+# TT (°Cd) con reinicio en siembra, LAI trigo (ec. 16), Ciec_t (ec. 9)
 
-def _acum_tt(df: pd.DataFrame, tb_crop: float = 0.0) -> pd.Series:
+def _acum_tt(df: pd.DataFrame, tb_crop: float = 0.0, fecha_siembra=None) -> pd.Series:
+    """Acumula TT (°Cd) y reinicia a cero en la fecha de siembra si se provee."""
     if not {"TMAX","TMIN"}.issubset(df.columns):
         return pd.Series(np.nan, index=df.index)
     tmean = (pd.to_numeric(df["TMAX"], errors="coerce") + pd.to_numeric(df["TMIN"], errors="coerce")) / 2.0
     ttd = np.maximum(tmean - float(tb_crop), 0.0)
-    return pd.Series(ttd).cumsum()
+    Dt = pd.Series(ttd, index=df.index).cumsum()
+    if fecha_siembra is not None:
+        sow = pd.to_datetime(fecha_siembra).normalize()
+        fechas = pd.to_datetime(df["Fecha"]).dt.normalize()
+        if (fechas == sow).any():
+            offset = float(Dt.loc[fechas == sow].iloc[0])
+            Dt = Dt - offset
+            Dt[Dt < 0] = 0.0
+    return Dt
 
 def _lai_trigo(Dt: np.ndarray,
                p1=0.1138, p2=3.71e-3, p3=47.98, p4=0.08012, p5=5.02e-5, p6=1.07e-8,
@@ -381,6 +390,7 @@ with st.sidebar.expander("Parámetros LAI (ec.16)"):
     p6 = st.number_input("p6", value=1.07e-8, format="%.8f")
     G1 = st.number_input("G1 (°Cd a LAI máx)", value=1116.0)
     G2 = st.number_input("G2 (°Cd a madurez)", value=2260.0)
+# La fecha de siembra para Ciec se elige más abajo (necesita el DF empalmado para un valor por defecto)
 
 # =================== CARGA MODELO ===================
 modelo = safe_run(cargar_modelo, "No se pudieron cargar los archivos del modelo.")
@@ -422,9 +432,12 @@ pred = modelo.predict(X_all, thr_bajo_medio=THR_BAJO_MEDIO, thr_medio_alto=THR_M
 pred["Fecha"] = df_empalmado["Fecha"].values
 pred["Julian_days"] = df_empalmado["Julian_days"].values
 
-# (NUEVO) Calcular Ciec si corresponde
+# ======= Ciec: elegir fecha de siembra y calcular (LAI comienza en 0 ese día) =======
+fecha_siembra_ciec = None
 if use_ciec:
-    Dt = _acum_tt(df_empalmado, tb_crop=Tb_crop)
+    fecha_siembra_ciec = pd.to_datetime(df_empalmado["Fecha"].min()).date()
+    fecha_siembra_ciec = st.sidebar.date_input("Fecha de siembra trigo (para Ciec)", value=fecha_siembra_ciec)
+    Dt = _acum_tt(df_empalmado, tb_crop=Tb_crop, fecha_siembra=fecha_siembra_ciec)
     LAI = _lai_trigo(Dt.values, p1,p2,p3,p4,p5,p6, G1,G2)
     Ciec = _ciec(LAI, LAIhc=LAIhc, Cs=Cs, Ca=Ca)
     pred["LAI_trigo"] = LAI
@@ -530,7 +543,10 @@ if use_ciec:
     figc = go.Figure()
     figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["LAI_trigo"], name="LAI trigo", mode="lines"))
     figc.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], name="Ciec_t (0-1)", mode="lines"))
-    # Si hubo ajuste, mostrar barras comparativas
+    try:
+        figc.add_vline(x=pd.to_datetime(fecha_siembra_ciec), line_dash="dot", line_color="#555", annotation_text="Siembra", annotation_position="top left")
+    except Exception:
+        pass
     if apply_ciec_to_emerrel:
         figc.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL sin ajuste", opacity=0.35)
         figc.add_bar(x=pred["Fecha"], y=pred["EMERREL(0-1)"], name="EMERREL × Ciec", opacity=0.6)
@@ -569,7 +585,8 @@ tabla["EMEAC (%)"] = pd.to_numeric(tabla["EMEAC (%)"], errors="coerce").fillna(0
 
 # Añadir columnas Ciec si se activó
 if use_ciec:
-    tabla = tabla.merge(pred[["Fecha","Ciec_trigo","LAI_trigo","Ajuste_Ciec_aplicado"]], on="Fecha", how="left")
+    add_cols = ["Fecha","Ciec_trigo","LAI_trigo","Ajuste_Ciec_aplicado"]
+    tabla = tabla.merge(pred[add_cols], on="Fecha", how="left")
 
 st.dataframe(tabla.sort_values("Fecha").reset_index(drop=True), use_container_width=True)
 
