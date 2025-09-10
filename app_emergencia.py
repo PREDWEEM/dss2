@@ -460,6 +460,13 @@ else:
 
 pred["EMERREL acumulado"] = pred["EMERREL(0-1)"].cumsum()
 
+# ======= Escalado "figura original": EMERREL en pl·m⁻² día⁻¹ (pico = 350) =======
+max_val = pd.to_numeric(pred["EMERREL(0-1)"], errors="coerce").max()
+scale_factor = 350.0 / max_val if pd.notna(max_val) and max_val > 0 else np.nan
+pred["EMERREL_pl_m2"] = pred["EMERREL(0-1)"].astype(float) * (scale_factor if pd.notna(scale_factor) else np.nan)
+# Si luego ajustamos por Ciec, el mismo factor permite comparar en la misma escala (barras)
+
+
 # EMEAC (global)
 pred["EMEAC (0-1) - mínimo"]    = pred["EMERREL acumulado"] / EMEAC_MIN_DEN
 pred["EMEAC (0-1) - máximo"]    = pred["EMERREL acumulado"] / EMEAC_MAX_DEN
@@ -542,22 +549,37 @@ fig_er.update_yaxes(rangemode="tozero")
 st.plotly_chart(fig_er, use_container_width=True, theme="streamlit")
 
 # ======= Gráfico combinado solicitado =======
-st.subheader("EMERREL, EMERREL×Ciec, Ciec e ICIC — en un mismo gráfico")
+st.subheader("EMERREL normalizada y en pl·m⁻², con Ciec/ICIC opcionales (eje secundario)")
 try:
     fig_all = go.Figure()
-    # Barras: EMERREL original y ajustada por Ciec (si hay)
-    fig_all.add_bar(x=pred["Fecha"], y=base_emerrel, name="EMERREL (0-1)", opacity=0.35)
+
+    # --- BARRAS en eje primario (densidad pl·m⁻² día⁻¹) ---
+    fig_all.add_bar(x=pred["Fecha"], y=pred["EMERREL_pl_m2"], name="EMERREL (pl·m⁻² día⁻¹)", opacity=0.35, yaxis="y1")
     if use_ciec:
         emerrel_x_ciec = (base_emerrel * pred["Ciec_trigo"].fillna(1.0)).clip(lower=0)
-        fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec, name="EMERREL × Ciec (0-1)", opacity=0.65)
-    # Líneas: Ciec e ICIC
+        emerrel_x_ciec_plm2 = emerrel_x_ciec.astype(float) * (scale_factor if pd.notna(scale_factor) else np.nan)
+        fig_all.add_bar(x=pred["Fecha"], y=emerrel_x_ciec_plm2, name="EMERREL×Ciec (pl·m⁻² día⁻¹)", opacity=0.65, yaxis="y1")
+
+    # --- LÍNEAS en eje secundario (0–1) ---
+    # EMERREL normalizada (0-1) como línea para comparar forma
+    fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=base_emerrel, mode="lines", name="EMERREL (0–1)", yaxis="y2"))
     if use_ciec:
-        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0-1)"))
+        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["Ciec_trigo"], mode="lines", name="Ciec_t (0–1)", yaxis="y2"))
     if use_icic:
-        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0-1)"))
-    fig_all.update_layout(xaxis_title="Fecha", yaxis_title="Valor (0-1)", hovermode="x unified", height=520,
-                          legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0))
+        fig_all.add_trace(go.Scatter(x=pred["Fecha"], y=pred["ICIC_M_t"], mode="lines", name="ICIC: M_t (0–1)", yaxis="y2"))
+
+    # Layout de doble eje
+    fig_all.update_layout(
+        hovermode="x unified",
+        height=560,
+        legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0),
+        xaxis=dict(title="Fecha"),
+        yaxis=dict(title="Densidad diaria (pl·m⁻² día⁻¹)", rangemode="tozero"),
+        yaxis2=dict(title="Valores normalizados (0–1)", overlaying='y', side='right', range=[0,1])
+    )
     st.plotly_chart(fig_all, use_container_width=True, theme="streamlit")
+except Exception as e:
+    st.warning(f"No se pudo renderizar el gráfico combinado (versiones + ejes): {e}")
 except Exception as e:
     st.warning(f"No se pudo renderizar el gráfico combinado (EMERREL×Ciec/ICIC). Detalle: {e}")
 except Exception as e:
@@ -627,3 +649,4 @@ st.download_button(
     data=buf.getvalue(), file_name=f"AVEFA_resultados_{'todo' if rango_opcion=='Todo el empalme' else 'rango'}.csv",
     mime="text/csv"
 )
+
