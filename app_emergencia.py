@@ -1,12 +1,11 @@
 # -*- coding: utf-8 -*-
 # app.py — PREDWEEM · Manejo manual con ICIC + Ciec + Control (NR=10d por defecto)
 # - Ventana de siembra e ICIC dinámico (ICIC(siem.)=0)
-# - Ciec(t) = (LAI/LAIhc) * (Cs/Ca), truncado a [0,1]
+# - Ciec(t) = (LAI/LAIhc) * (Cs/Ca), con opción de normalizar a pico=1 (misma forma)
 # - EMERAC cruda/ajustada opcional (curva/puntos)
-# - Bandas: residual (rango 30–60d; etiquetas opcionales)
-#           y NO residuales: por defecto 10 días (pre NR y post graminicida)
+# - Bandas: residual (rango 30–60d; etiquetas opcionales) y NO residuales: 10 días
 # - Eficiencias de control (%) por medida; combinación multiplicativa de solapamientos
-#   · Residuales con opción de decaimiento: Ninguno / Lineal / Exponencial (t1/2)
+#   · Residuales con decaimiento: Ninguno / Lineal / Exponencial (t1/2)
 # - Conversión EMERREL → plantas·m²: pico(EMERREL_cruda) ≙ 350 pl·m²
 # - Figura principal: EMERREL (izq), Plantas·m² (derecha opcional),
 #   y eje derecho adicional (0–1) para ICIC/Ciec/EMERAC
@@ -27,8 +26,7 @@ st.title(APP_TITLE)
 st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional.")
 
 # ========================== Constantes clave ==========================
-# Residualidad por defecto para NO residuales (pre selectivo NR y post graminicida)
-NR_DAYS_DEFAULT = 10
+NR_DAYS_DEFAULT = 10  # No residuales (pre selectivo NR y post graminicida)
 
 # ============================== Utils ================================
 def sniff_sep_dec(text: str):
@@ -111,13 +109,13 @@ def compute_icic(
     """
     Calcula ICIC en [0,1] sobre 'fechas' con arranque en 0 el día de la siembra.
     Devuelve: ICIC, FC (cobertura 0–1), LAI (m²/m²).
-    ICIC = (alpha*FC + beta*F_d + gamma*F_s - offset) / (1 - offset), offset = beta*F_d + gamma*F_s
+    ICIC = (alpha*FC + beta*F_d + gamma*F_s - offset) / (1 - offset),
+    offset = beta*F_d + gamma*F_s
     """
     days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
 
     def logistic_between(days, start, end, y_max):
-        if end <= start:
-            end = start + 1
+        if end <= start: end = start + 1
         t_mid = 0.5 * (start + end)
         r = 4.0 / max(1.0, (end - start))
         return y_max / (1.0 + np.exp(-r * (days - t_mid)))
@@ -254,6 +252,7 @@ with st.sidebar:
     Ca = st.number_input("Densidad real Ca (pl/m²)", 50, 700, 250, 10)
     Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
     LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 6.0, 0.1)
+    norm_ciec = st.checkbox("Normalizar Ciec a pico=1 (misma forma)", value=True)
 
 # =========== Etiquetas/visual + avanzadas (EMERAC y barras) ===========
 with st.sidebar:
@@ -285,7 +284,20 @@ ICIC, FC, LAI = compute_icic(
 )
 
 if use_ciec:
-    Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / max(1e-6, float(Ca)))
+    # Ciec "bruto" (misma forma que antes)
+    Ciec_raw = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / max(1e-6, float(Ca)))
+    Ciec_raw = np.maximum(Ciec_raw, 0.0)
+
+    # Normalización opcional para que el pico sea 1 (preserva la forma)
+    if norm_ciec:
+        max_raw = float(np.nanmax(Ciec_raw)) if Ciec_raw.size else 0.0
+        if max_raw > 0:
+            Ciec = Ciec_raw / max_raw
+        else:
+            Ciec = np.zeros_like(Ciec_raw)
+    else:
+        Ciec = np.clip(Ciec_raw, 0.0, 1.0)
+
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
     Ciec = np.full_like(ICIC, np.nan, dtype=float)
@@ -671,6 +683,7 @@ diag = {
     "factor_pl_m2_por_EMERREL": (350.0 / float(df_plot["EMERREL"].max())) if float(df_plot["EMERREL"].max()) > 0 else None,
     "ICIC_sowing_day": float(ICIC[0]) if len(ICIC) else None,
     "decaimiento": decaimiento_tipo,
-    "NR_no_residuales_dias": NR_DAYS_DEFAULT
+    "NR_no_residuales_dias": NR_DAYS_DEFAULT,
+    "Ciec_normalizado": bool(use_ciec and norm_ciec)
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
