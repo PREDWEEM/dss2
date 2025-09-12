@@ -173,42 +173,6 @@ except Exception as e:
 # st.subheader("Vista previa (primeras 15 filas del CSV)")
 # st.dataframe(df0.head(15), use_container_width=True)
 
-# ===================== Selección de columnas ===========================
-# cols = list(df0.columns)
-# with st.expander("Seleccionar columnas y depurar datos", expanded=True):
-    c_fecha = st.selectbox("Columna de fecha", cols, index=0)
-    c_valor = st.selectbox("Columna de valor (EMERREL diaria o EMERAC)", cols, index=1 if len(cols)>1 else 0)
-
-    fechas = pd.to_datetime(df0[c_fecha], dayfirst=dayfirst, errors="coerce")
-    sample_str = df0[c_valor].astype(str).head(200).str.cat(sep=" ")
-    dec_for_col = "," if (sample_str.count(",")>sample_str.count(".") and re.search(r",\d", sample_str)) else "."
-    vals = clean_numeric_series(df0[c_valor], decimal=dec_for_col)
-
-    df = pd.DataFrame({"fecha": fechas, "valor": vals}).dropna().sort_values("fecha").reset_index(drop=True)
-    if df.empty:
-        st.error("Tras el parseo no quedaron filas válidas (fechas/valores NaN)."); st.stop()
-
-    if df["fecha"].duplicated().any():
-        if dedup == "sumar":
-            df = df.groupby("fecha", as_index=False)["valor"].sum()
-        elif dedup == "promediar":
-            df = df.groupby("fecha", as_index=False)["valor"].mean()
-        else:
-            df = df.drop_duplicates(subset=["fecha"], keep="first")
-
-    if fill_gaps and len(df) > 1:
-        full_idx = pd.date_range(df["fecha"].min(), df["fecha"].max(), freq="D")
-        df = df.set_index("fecha").reindex(full_idx).rename_axis("fecha").reset_index()
-        df["valor"] = df["valor"].fillna(0.0)
-
-    emerrel = df["valor"].astype(float)
-    if as_percent:
-        emerrel = emerrel / 100.0
-    if is_cumulative:
-        emerrel = emerrel.diff().fillna(0.0).clip(lower=0.0)
-    emerrel = emerrel.clip(lower=0.0)
-    df_plot = pd.DataFrame({"fecha": pd.to_datetime(df["fecha"]), "EMERREL": emerrel})
-
 # ==================== Siembra & parámetros ICIC ========================
 years = df_plot["fecha"].dt.year.dropna().astype(int)
 year_ref = int(years.mode().iloc[0]) if len(years) else dt.date.today().year
