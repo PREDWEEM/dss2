@@ -453,11 +453,15 @@ N_escape_sup = min(MAX_PLANTS_CAP, N_escape_sup_raw) if np.isfinite(N_escape_sup
 N_escape_sup_ctrl = min(MAX_PLANTS_CAP, N_escape_sup_ctrl_raw) if np.isfinite(N_escape_sup_ctrl_raw) else float("nan")
 
 # ======= Sumatoria QUINCENAL (cada 15 días desde la siembra) =======
-days_since = (df_plot["fecha"].dt.date - sow_date).days
+# (1) Normalizar timestamps y restar contra sow_date para obtener días enteros
+ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
+days_since = (ts_norm - pd.Timestamp(sow_date)).dt.days
 mask_quince = (days_since >= 0) & (days_since % 15 == 0)
+# (2) Convertir la máscara a NumPy al indexar arrays NumPy
+mask_q = mask_quince.to_numpy()
 
-N_escape_sup_raw_quincenal = float(np.nansum(plantas_supresion[mask_quince])) if has_factor else float("nan")
-N_escape_sup_ctrl_raw_quincenal = float(np.nansum(plantas_supresion_ctrl[mask_quince])) if has_factor else float("nan")
+N_escape_sup_raw_quincenal = float(np.nansum(plantas_supresion[mask_q])) if has_factor else float("nan")
+N_escape_sup_ctrl_raw_quincenal = float(np.nansum(plantas_supresion_ctrl[mask_q])) if has_factor else float("nan")
 
 N_escape_sup_quincenal = min(MAX_PLANTS_CAP, N_escape_sup_raw_quincenal) if np.isfinite(N_escape_sup_raw_quincenal) else float("nan")
 N_escape_sup_ctrl_quincenal = min(MAX_PLANTS_CAP, N_escape_sup_ctrl_raw_quincenal) if np.isfinite(N_escape_sup_ctrl_raw_quincenal) else float("nan")
@@ -563,7 +567,12 @@ if show_nonres_bands:
 
 # ======================== Ejes y escalas ==============================
 ymax_base = float(df_plot["EMERREL"].max())
-ymax_ctrl = float(np.nanmax(emerrel_eff_ctrl)) if np.isfinite(np.nanmax(emerrel_eff_ctrl)) else 0.0
+try:
+    ymax_ctrl = float(np.nanmax(emerrel_eff_ctrl))
+except Exception:
+    ymax_ctrl = 0.0
+if not np.isfinite(ymax_ctrl):
+    ymax_ctrl = 0.0
 ymax = max(1e-6, (max(ymax_base, ymax_ctrl) * 1.15))
 
 layout_kwargs = dict(
@@ -654,8 +663,8 @@ if has_factor:
     out["Plantas_m2_supresion_acum_cap"]      = np.round(np.minimum(out["Plantas_m2_supresion_acum"].values, MAX_PLANTS_CAP), 1)
     out["Plantas_m2_supresion_ctrl_acum_cap"] = np.round(np.minimum(out["Plantas_m2_supresion_ctrl_acum"].values, MAX_PLANTS_CAP), 1)
     # Series QUINCENALES (solo en días múltiplos de 15 desde siembra; NaN resto)
-    sup_q = np.where(mask_quince, plantas_supresion, np.nan)
-    sup_ctrl_q = np.where(mask_quince, plantas_supresion_ctrl, np.nan)
+    sup_q = np.where(mask_q, plantas_supresion, np.nan)
+    sup_ctrl_q = np.where(mask_q, plantas_supresion_ctrl, np.nan)
     out["Plantas_m2_supresion_quincenal"] = np.round(sup_q, 1)
     out["Plantas_m2_supresion_ctrl_quincenal"] = np.round(sup_ctrl_q, 1)
     # Acumuladas QUINCENALES sin tope
@@ -742,3 +751,4 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
+
