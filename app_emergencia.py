@@ -625,6 +625,62 @@ st.markdown(
 """
 )
 
+# ======================= Pérdida de rendimiento (%) =======================
+# Fórmula solicitada:
+# Perdida % = 0,375*A2 / (1 + (0,375*A2/76,639))
+# (En Python usamos punto decimal)
+def perdida_rinde_pct(A2):
+    A2 = np.asarray(A2, dtype=float)
+    return 0.375 * A2 / (1.0 + (0.375 * A2 / 76.639))
+
+# A2 es la suma final de plantas·m² (quincenal, con tope de 250 ya aplicado)
+A2_sup_final   = N_escape_sup_quincenal
+A2_ctrl_final  = N_escape_sup_ctrl_quincenal
+
+loss_sup_pct  = float(perdida_rinde_pct(A2_sup_final))  if np.isfinite(A2_sup_final)  else float("nan")
+loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_final)) if np.isfinite(A2_ctrl_final) else float("nan")
+
+st.subheader("Pérdida de rendimiento estimada (%)")
+st.markdown(
+    f"""
+**Sólo supresión (1−Ciec):** **{loss_sup_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_sup_final:,.1f} pl·m²  
+**Supresión + control post:** **{loss_ctrl_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_ctrl_final:,.1f} pl·m²
+"""
+)
+
+# =================== Gráfico: Pérdida (%) vs Densidad final ===============
+x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
+y_curve = perdida_rinde_pct(x_curve)
+
+fig_loss = go.Figure()
+fig_loss.add_trace(go.Scatter(
+    x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida %"
+))
+
+# Marcar puntos del escenario actual
+if np.isfinite(A2_sup_final):
+    fig_loss.add_trace(go.Scatter(
+        x=[A2_sup_final], y=[loss_sup_pct], mode="markers+text",
+        name="Solo supresión",
+        text=["Supresión"], textposition="top center",
+        marker=dict(size=10, symbol="circle")
+    ))
+if np.isfinite(A2_ctrl_final):
+    fig_loss.add_trace(go.Scatter(
+        x=[A2_ctrl_final], y=[loss_ctrl_pct], mode="markers+text",
+        name="Supresión + control",
+        text=["Supresión+control"], textposition="bottom center",
+        marker=dict(size=10, symbol="diamond")
+    ))
+
+fig_loss.update_layout(
+    title="Pérdida de rendimiento (%) vs. densidad final (pl·m²)",
+    xaxis_title="Densidad final de plantas (pl·m²)",
+    yaxis_title="Pérdida de rendimiento (%)",
+    margin=dict(l=10, r=10, t=40, b=10)
+)
+st.plotly_chart(fig_loss, use_container_width=True)
+
 # ============================== Cronograma ============================
 st.subheader("Cronograma de manejo (manual)")
 if len(sched):
