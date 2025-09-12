@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
-# app.py — PREDWEEM · ICIC + supresión (1−Ciec) + Control (NR=10d por defecto)
+# app.py — PREDWEEM · ICIC + supresión (1−Ciec) + Control
 # - EMERREL × (1 − Ciec) (supresión) + control post
 # - Conversión EMERREL→plantas·m² con escala configurable (scale_peak)
-# - Sumatoria QUINCENAL REAL (bloques de 15 días desde la siembra)
-# - Pérdida de rendimiento con A2 CAPADO (cap_max)
-# - RAW vs CAP en UI + aviso si se alcanza el tope
-# - Sin vista previa de CSV; botón recarga; cache TTL=60s
+# - Sumatoria QUINCENAL REAL (bloques de 15 días desde siembra)
+# - CAP QUINCENAL=250 aplicado a cada quincena
+# - Manejo aplicado "sobre CAP": cap_quincena * (sup_ctrl/sup)
+# - Pérdida de rendimiento con A2 = suma de CAP quincenal
+# - RAW diario disponible para gráficos; sin vista previa de CSV; botón recarga; cache TTL=60s
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -22,7 +23,8 @@ st.title(APP_TITLE)
 st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional. Usa supresión: EMERREL × (1 − Ciec).")
 
 # ========================== Constantes clave ==========================
-NR_DAYS_DEFAULT = 10  # no residuales
+NR_DAYS_DEFAULT = 10          # no residuales
+CAP_QUINCENAL   = 250.0       # tope por quincena (fijo), sobre el cual se aplica el manejo
 
 # ============================== Utils ================================
 def sniff_sep_dec(text: str):
@@ -34,7 +36,7 @@ def sniff_sep_dec(text: str):
         dec_guess = ","
     return sep_guess, dec_guess
 
-@st.cache_data(show_spinner=False, ttl=60)  # refresco automático de URL
+@st.cache_data(show_spinner=False, ttl=60)
 def read_raw_from_url(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urlopen(req, timeout=30) as r:
@@ -175,8 +177,6 @@ except (URLError, HTTPError) as e:
 except Exception as e:
     st.error(f"No se pudo leer el CSV: {e}"); st.stop()
 
-# (sin vista previa)
-
 # ===================== Selección de columnas ===========================
 cols = list(df0.columns)
 with st.expander("Seleccionar columnas y depurar datos", expanded=True):
@@ -238,7 +238,7 @@ with st.sidebar:
     gamma = st.slider("γ (entrehileras)", 0.0, 1.0, 0.15, 0.05)
     theta = st.slider("Umbral ICIC (θ)", 0.2, 0.9, 0.6, 0.05)
 
-# ========================= Sidebar: Ciec y Escala/Tope =================
+# ========================= Sidebar: Ciec y Escala =====================
 with st.sidebar:
     st.header("Ciec (competencia del cultivo)")
     use_ciec = st.checkbox("Calcular y mostrar Ciec", value=True)
@@ -247,9 +247,8 @@ with st.sidebar:
     LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)
 
 with st.sidebar:
-    st.header("Escala & Tope (plantas·m²)")
+    st.header("Escala de conversión")
     scale_peak = st.number_input("Escalar pico EMERREL a… (pl·m²)", 10.0, 5000.0, 250.0, 10.0)
-    cap_max    = st.number_input("Tope A2 (pl·m²) para pérdida de rinde", 10.0, 5000.0, 250.0, 10.0)
 
 # =========== Etiquetas/visual + avanzadas ===========
 with st.sidebar:
@@ -305,7 +304,7 @@ else:
 _, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 _, work_star, tot_star = percentiles_from_emerrel(df_eff["EMERREL_eff"], df_eff["fecha"])
 
-# ===== Conversión EMERREL → Plantas·m² (usa scale_peak, NO el tope) =====
+# ===== Conversión EMERREL → Plantas·m² (usa scale_peak) =====
 pico = float(df_plot["EMERREL"].max())
 if pico > 0:
     factor = scale_peak / pico
@@ -421,7 +420,7 @@ def weights_residual(start_date, dias):
         w[idxs] = 1.0
     elif decaimiento_tipo == "Lineal":
         L = max(1, len(idxs))
-        w[idxs] = 1.0 - (t_rel / max(1.0, L - 1))
+        w[idxs] = 1.0 - (t_rel / max(1.0, L - 1))  # 1 → 0
     else:  # Exponencial
         assert lam_exp is not None
         w[idxs] = np.exp(-lam_exp * t_rel)
@@ -454,10 +453,11 @@ else:
     plantas_eff_ctrl = np.full(len(df_plot), np.nan)
     plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
 
-# ======= Sumatoria QUINCENAL REAL (bloques de 15 días desde siembra) =======
+# ======= Sumatoria QUINCENAL REAL con CAP y manejo SOBRE CAP ==========
 ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
 days_since = (ts_norm - pd.Timestamp(sow_date)).dt.days
 valid = days_since >= 0
+
 blk = np.floor_divide(days_since[valid].to_numpy(), 15).astype(int)  # 0,1,2,...
 
 _sup    = np.nan_to_num(plantas_supresion[valid], nan=0.0)
@@ -476,25 +476,29 @@ agg_q = (df_q.groupby("bloque", as_index=False)
               fecha_ini=("fecha_ini", "min"))
          .sort_values("bloque"))
 
-# Totales RAW (suma de bloques) y con TOPE cap_max
-N_escape_sup_raw_quincenal      = float(agg_q["sup_sum"].sum()) if len(agg_q) else float("nan")
-N_escape_sup_ctrl_raw_quincenal = float(agg_q["sup_ctrl_sum"].sum()) if len(agg_q) else float("nan")
-
-N_escape_sup_quincenal        = min(cap_max, N_escape_sup_raw_quincenal) if np.isfinite(N_escape_sup_raw_quincenal) else float("nan")
-N_escape_sup_ctrl_quincenal   = min(cap_max, N_escape_sup_ctrl_raw_quincenal) if np.isfinite(N_escape_sup_ctrl_raw_quincenal) else float("nan")
-
-# Acumuladas por bloque (útiles para UI/descarga)
 if len(agg_q):
-    agg_q["sup_acum"]      = agg_q["sup_sum"].cumsum()
-    agg_q["sup_ctrl_acum"] = agg_q["sup_ctrl_sum"].cumsum()
-    agg_q["sup_acum_cap"]      = np.minimum(agg_q["sup_acum"], cap_max)
-    agg_q["sup_ctrl_acum_cap"] = np.minimum(agg_q["sup_ctrl_acum"], cap_max)
+    # CAP por quincena para base
+    agg_q["cap_sup_sum"] = np.minimum(agg_q["sup_sum"], CAP_QUINCENAL)
 
-# Aviso si ambos escenarios están en techo
-capped_sup  = np.isfinite(N_escape_sup_raw_quincenal)      and (N_escape_sup_raw_quincenal  >= cap_max - 1e-9)
-capped_ctrl = np.isfinite(N_escape_sup_ctrl_raw_quincenal) and (N_escape_sup_ctrl_raw_quincenal >= cap_max - 1e-9)
-if capped_sup and capped_ctrl:
-    st.warning("Ambos escenarios alcanzan el tope (A2 = tope). Subí el **Tope A2 (pl·m²)** o mirá los valores **RAW** para ver el efecto del manejo.")
+    # Manejo sobre CAP: ratio = sup_ctrl_sum / sup_sum (si sup_sum=0 -> ratio=0)
+    ratio = np.divide(
+        agg_q["sup_ctrl_sum"].to_numpy(),
+        np.where(agg_q["sup_sum"].to_numpy() > 0, agg_q["sup_sum"].to_numpy(), np.nan),
+        out=np.zeros_like(agg_q["sup_ctrl_sum"].to_numpy(), dtype=float),
+        where=agg_q["sup_sum"].to_numpy() > 0
+    )
+    agg_q["cap_sup_ctrl_sum"] = agg_q["cap_sup_sum"] * ratio
+
+    # Totales estacionales (suma de CAP por quincena)
+    A2_sup_cap  = float(agg_q["cap_sup_sum"].sum())
+    A2_ctrl_cap = float(agg_q["cap_sup_ctrl_sum"].sum())
+
+    # Acumuladas CAP por quincena (opcional para UI)
+    agg_q["cap_sup_acum"]      = agg_q["cap_sup_sum"].cumsum()
+    agg_q["cap_sup_ctrl_acum"] = agg_q["cap_sup_ctrl_sum"].cumsum()
+else:
+    A2_sup_cap  = float("nan")
+    A2_ctrl_cap = float("nan")
 
 # ============================== Gráfico principal ======================
 fig = go.Figure()
@@ -573,7 +577,11 @@ if show_nonres_bands:
     if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
 
 ymax_base = float(df_plot["EMERREL"].max())
-ymax_ctrl = float(np.nanmax(emerrel_eff_ctrl)) if np.isfinite(np.nanmax(emerrel_eff_ctrl)) else 0.0
+try:
+    ymax_ctrl = float(np.nanmax(emerrel_eff_ctrl))
+except Exception:
+    ymax_ctrl = 0.0
+if not np.isfinite(ymax_ctrl): ymax_ctrl = 0.0
 ymax = max(1e-6, (max(ymax_base, ymax_ctrl) * 1.15))
 
 layout_kwargs = dict(
@@ -589,7 +597,6 @@ if show_plants_axis and has_factor:
         np.nanmax(plantas_supresion_ctrl)
     ]))
     if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = 1.0
-
     layout_kwargs["yaxis2"] = dict(overlaying="y", side="right", title="Plantas·m² (estimadas)", position=1.0,
                                    range=[0, plantas_max*1.15])
     fig.add_trace(go.Scatter(x=df_plot["fecha"], y=plantas_cruda, name="Plantas·m² (escala)",
@@ -609,17 +616,14 @@ else:
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
-st.caption(f"{conv_caption} · Tope A2 (pérdida) = {cap_max:.0f} pl·m² · Escala pico = {scale_peak:.0f} pl·m².")
+st.caption(f"{conv_caption} · CAP quincenal = {CAP_QUINCENAL:.0f} pl·m² · El manejo se aplica SOBRE CAP (cap × ratio).")
 
-# ======================= Totales visibles (QUINCENAL) =================
-st.subheader("Plantas·m² que escapan — Sumatoria QUINCENAL")
+# ======================= Totales visibles (QUINCENAL, CAP) ============
+st.subheader("Plantas·m² que escapan — Sumatoria QUINCENAL (CAP por quincena = 250)")
 st.markdown(
     f"""
-**RAW — Solo supresión:** **{N_escape_sup_raw_quincenal:,.1f}** pl·m²  
-**RAW — Supresión + control:** **{N_escape_sup_ctrl_raw_quincenal:,.1f}** pl·m²  
-
-**CAP ({cap_max:.0f}) — Solo supresión:** **{N_escape_sup_quincenal:,.1f}** pl·m²  
-**CAP ({cap_max:.0f}) — Supresión + control:** **{N_escape_sup_ctrl_quincenal:,.1f}** pl·m²
+**CAP por quincena — Solo supresión (1−Ciec):** **{A2_sup_cap:,.1f}** pl·m²  
+**CAP por quincena — Supresión + control:** **{A2_ctrl_cap:,.1f}** pl·m²
 """
 )
 
@@ -628,34 +632,32 @@ def perdida_rinde_pct(A2):
     A2 = np.asarray(A2, dtype=float)
     return 0.375 * A2 / (1.0 + (0.375 * A2 / 76.639))
 
-A2_sup_final  = N_escape_sup_quincenal
-A2_ctrl_final = N_escape_sup_ctrl_quincenal
-loss_sup_pct  = float(perdida_rinde_pct(A2_sup_final))  if np.isfinite(A2_sup_final)  else float("nan")
-loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_final)) if np.isfinite(A2_ctrl_final) else float("nan")
+loss_sup_pct  = float(perdida_rinde_pct(A2_sup_cap))  if np.isfinite(A2_sup_cap)  else float("nan")
+loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_cap)) if np.isfinite(A2_ctrl_cap) else float("nan")
 
 st.subheader("Pérdida de rendimiento estimada (%)")
 st.markdown(
     f"""
-**Sólo supresión (1−Ciec):** **{loss_sup_pct:,.2f}%**  &nbsp;|&nbsp;  A2 (CAP) = {A2_sup_final:,.1f} pl·m²  
-**Supresión + control post:** **{loss_ctrl_pct:,.2f}%**  &nbsp;|&nbsp;  A2 (CAP) = {A2_ctrl_final:,.1f} pl·m²
+**Sólo supresión (1−Ciec):** **{loss_sup_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_sup_cap:,.1f} pl·m²  
+**Supresión + control:** **{loss_ctrl_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_ctrl_cap:,.1f} pl·m²
 """
 )
 
 # =================== Gráfico: Pérdida (%) vs Densidad final ===========
-x_curve = np.linspace(0.0, max(1.0, cap_max), 400)
+x_curve = np.linspace(0.0, max(1.0, CAP_QUINCENAL*8), 400)  # rango ilustrativo
 y_curve = perdida_rinde_pct(x_curve)
 fig_loss = go.Figure()
 fig_loss.add_trace(go.Scatter(x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida %"))
-if np.isfinite(A2_sup_final):
-    fig_loss.add_trace(go.Scatter(x=[A2_sup_final], y=[loss_sup_pct], mode="markers+text",
+if np.isfinite(A2_sup_cap):
+    fig_loss.add_trace(go.Scatter(x=[A2_sup_cap], y=[loss_sup_pct], mode="markers+text",
                                   name="Solo supresión", text=["Supresión"], textposition="top center",
                                   marker=dict(size=10, symbol="circle")))
-if np.isfinite(A2_ctrl_final):
-    fig_loss.add_trace(go.Scatter(x=[A2_ctrl_final], y=[loss_ctrl_pct], mode="markers+text",
+if np.isfinite(A2_ctrl_cap):
+    fig_loss.add_trace(go.Scatter(x=[A2_ctrl_cap], y=[loss_ctrl_pct], mode="markers+text",
                                   name="Supresión + control", text=["Supresión+control"], textposition="bottom center",
                                   marker=dict(size=10, symbol="diamond")))
 fig_loss.update_layout(
-    title=f"Pérdida de rendimiento (%) vs. densidad final (pl·m²) — Tope A2={cap_max:.0f}",
+    title=f"Pérdida de rendimiento (%) vs. densidad final (pl·m²)",
     xaxis_title="Densidad final de plantas (pl·m²)",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
@@ -684,28 +686,12 @@ if has_factor:
     out["Plantas_m2_est_supresion"]      = np.round(plantas_supresion, 1)
     out["Plantas_m2_est_ef_ctrl"]        = np.round(plantas_eff_ctrl, 1)
     out["Plantas_m2_est_supresion_ctrl"] = np.round(plantas_supresion_ctrl, 1)
-    # Marcar suma quincenal en el primer día de cada bloque
-    out["Plantas_m2_supresion_quincenal_sum"] = np.nan
-    out["Plantas_m2_supresion_ctrl_quincenal_sum"] = np.nan
-    if len(agg_q):
-        ts_norm_full = pd.to_datetime(out["fecha"]).dt.normalize().to_list()
-        fecha_to_idx = {ts_norm_full[i]: i for i in range(len(ts_norm_full))}
-        for _, r in agg_q.iterrows():
-            idx = fecha_to_idx.get(pd.Timestamp(r["fecha_ini"]))
-            if idx is not None:
-                out.loc[idx, "Plantas_m2_supresion_quincenal_sum"] = round(float(r["sup_sum"]), 1)
-                out.loc[idx, "Plantas_m2_supresion_ctrl_quincenal_sum"] = round(float(r["sup_ctrl_sum"]), 1)
 else:
-    out["Plantas_m2_est_cruda"] = np.nan
-    out["Plantas_m2_est_ef"]    = np.nan
-    out["Plantas_m2_est_supresion"] = np.nan
-    out["Plantas_m2_est_ef_ctrl"] = np.nan
-    out["Plantas_m2_est_supresion_ctrl"] = np.nan
-    out["Plantas_m2_supresion_quincenal_sum"] = np.nan
-    out["Plantas_m2_supresion_ctrl_quincenal_sum"] = np.nan
+    for c in ["Plantas_m2_est_cruda","Plantas_m2_est_ef","Plantas_m2_est_supresion","Plantas_m2_est_ef_ctrl","Plantas_m2_est_supresion_ctrl"]:
+        out[c] = np.nan
 
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + f" · Tope A2 (pérdida) = {cap_max:.0f} · Escala pico = {scale_peak:.0f} · Totales quincenales por bloques de 15 días")
+    st.caption(conv_caption + f" · CAP quincenal = {CAP_QUINCENAL:.0f} · Manejo SOBRE CAP (cap × ratio)")
     only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m²", value=False)
 
     default_cols = [
@@ -714,7 +700,6 @@ with st.expander("Descargas de series", expanded=True):
         "EMERREL_eff_ctrl", "EMERREL_supresion_ctrl",
         "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_supresion",
         "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_supresion_ctrl",
-        "Plantas_m2_supresion_quincenal_sum", "Plantas_m2_supresion_ctrl_quincenal_sum",
     ]
     available_cols = [c for c in default_cols if c in out.columns] + [c for c in out.columns if c not in default_cols]
     preselect = [c for c in available_cols if c.startswith("Plantas_m2")] if only_plants else [c for c in available_cols if c in default_cols]
@@ -728,13 +713,14 @@ with st.expander("Descargas de series", expanded=True):
     st.download_button("Descargar serie procesada (CSV)", out[selected_cols].to_csv(index=False).encode("utf-8"),
                        "serie_procesada.csv", "text/csv")
 
-# ============ Tabla de sumas quincenales (por bloque) =================
-with st.expander("Ver/descargar sumas quincenales (bloques de 15 días)", expanded=False):
+# ============ Tabla de sumas quincenales (con CAP aplicado) ===========
+with st.expander("Ver/descargar sumas quincenales (con CAP aplicado por quincena)", expanded=False):
     if len(agg_q):
-        show_cols = ["bloque", "fecha_ini", "sup_sum", "sup_ctrl_sum", "sup_acum", "sup_ctrl_acum", "sup_acum_cap", "sup_ctrl_acum_cap"]
+        show_cols = ["bloque", "fecha_ini", "sup_sum", "sup_ctrl_sum", "cap_sup_sum", "cap_sup_ctrl_sum",
+                     "cap_sup_acum", "cap_sup_ctrl_acum"]
         st.dataframe(agg_q[show_cols], use_container_width=True)
-        st.download_button("Descargar sumas quincenales (CSV)", agg_q.to_csv(index=False).encode("utf-8"),
-                           "sumas_quincenales.csv", "text/csv")
+        st.download_button("Descargar sumas quincenales (CSV)", agg_q[show_cols].to_csv(index=False).encode("utf-8"),
+                           "sumas_quincenales_cap.csv", "text/csv")
     else:
         st.info("No hay días ≥ siembra para calcular bloques quincenales.")
 
@@ -748,18 +734,16 @@ diag = {
     "suma_EMERREL_ef_ctrl": float(np.nansum(emerrel_eff_ctrl)),
     "suma_EMERREL_supresion": float(np.nansum(emerrel_supresion)),
     "suma_EMERREL_supresion_ctrl": float(np.nansum(emerrel_supresion_ctrl)),
-    "A2_sup_RAW": N_escape_sup_raw_quincenal,
-    "A2_ctrl_RAW": N_escape_sup_ctrl_raw_quincenal,
-    "A2_sup_CAP": N_escape_sup_quincenal,
-    "A2_ctrl_CAP": N_escape_sup_ctrl_quincenal,
+    # A2 segun CAP quincenal
+    "A2_sup_CAP_quincenal": A2_sup_cap,
+    "A2_ctrl_CAP_quincenal": A2_ctrl_cap,
+    # Otros
     "scale_peak_pl_m2": scale_peak,
-    "cap_max_pl_m2": cap_max,
-    "tot_base": float(tot_base),
-    "tot_ajustada": float(tot_star),
     "pico_EMERREL": float(df_plot["EMERREL"].max()),
     "factor_pl_m2_por_EMERREL": (scale_peak / float(df_plot["EMERREL"].max())) if float(df_plot["EMERREL"].max()) > 0 else None,
     "ICIC_sowing_day": float(ICIC[idx_sow[0]]) if len(ICIC) and 'idx_sow' in locals() and idx_sow.size else None,
     "decaimiento": decaimiento_tipo,
-    "NR_no_residuales_dias": NR_DAYS_DEFAULT
+    "NR_no_residuales_dias": NR_DAYS_DEFAULT,
+    "CAP_QUINCENAL": CAP_QUINCENAL
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
