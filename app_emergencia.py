@@ -170,8 +170,8 @@ except (URLError, HTTPError) as e:
 except Exception as e:
     st.error(f"No se pudo leer el CSV: {e}"); st.stop()
 
-st.subheader("Vista previa (primeras 15 filas del CSV)")
-st.dataframe(df0.head(15), use_container_width=True)
+# st.subheader("Vista previa (primeras 15 filas del CSV)")
+# st.dataframe(df0.head(15), use_container_width=True)
 
 # ===================== Selección de columnas ===========================
 cols = list(df0.columns)
