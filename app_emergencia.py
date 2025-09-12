@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d por defecto)
-# - Sin ICIC: NO se calculan ICIC, EMERREL (ef ICIC) ni EMERREL (ef ICIC) (control)
-# - Cálculo de Ciec desde LAI/cobertura (sin ICIC)
+# - Sin ICIC: NO se calculan ICIC ni variantes "ef ICIC"
+# - Cálculo de Ciec desde canopia (FC/LAI) sin ICIC
 # - Conversión a Plantas·m² anclada al pico de la SUPRESIÓN (→ 250 pl·m²)
 # - A2 = SUMA de valores INSTANTÁNEOS QUINCENALES (cada 15 días desde siembra), con TOPE 250
 # - Pérdida de rinde calculada con A2 (topeado)
@@ -229,9 +229,7 @@ with st.sidebar:
 
     st.header("Visualización avanzada")
     show_emac_curve_raw = st.checkbox("Mostrar EMERAC (curva) cruda", value=False)
-    show_emac_curve_adj = st.checkbox("Mostrar EMERAC (curva) ajustada", value=False)
     show_emac_points_raw = st.checkbox("Mostrar EMERAC (puntos) cruda", value=False)
-    show_emac_points_adj = st.checkbox("Mostrar EMERAC (puntos) ajustada", value=False)
     show_nonres_bands = st.checkbox("Marcar bandas NR (por defecto 10 días)", value=True)
 
 if not (sow_min <= sow_date <= sow_max):
@@ -253,7 +251,7 @@ else:
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
 
-# Percentiles/acumuladas (solo para EMERAC visual si se activa)
+# Opcional: EMERAC (solo visual) si se activa
 _, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 
 # ===== SUPRESIÓN (base de toda la parte agronómica) ===================
@@ -426,23 +424,25 @@ df_quince = pd.DataFrame({
     "Plantas_m2_supresion_ctrl_Q": np.round(Q_sup_ctrl_vals, 1),
 }).loc[mask_q].sort_values("fecha").reset_index(drop=True)
 
-# ============================== Gráfico ===============================
+# ============================== Gráfico 1 ==============================
 fig = go.Figure()
 
-# EMERREL (solo informativo)
+# 1) EMERREL cruda (informativa)
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=df_plot["EMERREL"], mode="lines",
     name="EMERREL (cruda)",
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL: %{y:.4f}<extra></extra>"
 ))
 
-# Supresión (base de densidad y pérdida)
+# 2) Supresión (base para plantas y rinde)
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=emerrel_supresion, mode="lines",
     name="EMERREL × (1 − Ciec)", line=dict(dash="dashdot"),
     customdata=np.column_stack([plantas_supresion]),
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión: %{y:.4f}<br>Plantas·m² (sup.): %{customdata[0]:.1f}<extra></extra>"
 ))
+
+# 3) Supresión + control
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=emerrel_supresion_ctrl, mode="lines",
     name="EMERREL × (1 − Ciec) (control)", line=dict(dash="dot", width=2),
@@ -486,19 +486,23 @@ if show_nonres_bands:
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
     if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
 
-# ======================== Ejes y escalas ==============================
-ymax = float(np.nanmax([df_plot["EMERREL"].max(), np.nanmax(emerrel_supresion_ctrl)])) if use_ciec else float(df_plot["EMERREL"].max())
+# Ejes y escalas
+ymax = float(np.nanmax([
+    df_plot["EMERREL"].max(),
+    np.nanmax(emerrel_supresion) if np.isfinite(np.nanmax(emerrel_supresion)) else 0.0,
+    np.nanmax(emerrel_supresion_ctrl) if np.isfinite(np.nanmax(emerrel_supresion_ctrl)) else 0.0
+]))
 ymax = max(1e-6, ymax * 1.15)
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title=f"Supresión (1−Ciec) + Control",
+    title="EMERREL + Supresión (1−Ciec) + Control",
     xaxis_title="Fecha",
     yaxis_title="EMERREL / Supresión",
     yaxis=dict(range=[0, ymax])
 )
 
-# Eje derecho opcional: Plantas·m² (líneas + opcional barras)
+# Eje derecho opcional: Plantas·m²
 if show_plants_axis and (factor_sup is not None) and np.isfinite(factor_sup):
     plantas_max = float(np.nanmax([np.nanmax(plantas_supresion), np.nanmax(plantas_supresion_ctrl)]))
     if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = 1.0
@@ -511,47 +515,17 @@ if show_plants_axis and (factor_sup is not None) and np.isfinite(factor_sup):
         range=[0, plantas_max*1.15]
     )
 
-    # Líneas de densidad (y2)
     fig.add_trace(go.Scatter(
         x=df_plot["fecha"], y=plantas_supresion,
-        name="Plantas·m² × (1−Ciec)",
-        yaxis="y2", mode="lines",
+        name="Plantas·m² × (1−Ciec)", yaxis="y2", mode="lines",
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup.): %{y:.1f}<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
         x=df_plot["fecha"], y=plantas_supresion_ctrl,
-        name="Plantas·m² × (1−Ciec) (control)",
-        yaxis="y2", mode="lines",
+        name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", mode="lines",
         line=dict(dash="dot"),
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup. ctrl): %{y:.1f}<extra></extra>"
     ))
-
-    # Barras opcionales (y2)
-    if show_sup_density:
-        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion,
-                    name="Plantas·m² × (1−Ciec) (barras)", yaxis="y2", opacity=0.3)
-        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion_ctrl,
-                    name="Plantas·m² × (1−Ciec) (control, barras)", yaxis="y2", opacity=0.3)
-
-# Eje auxiliar para Ciec/EMERAC (sin ICIC)
-layout_kwargs["yaxis3"] = dict(
-    overlaying="y", side="right", title="Ciec / EMERAC (0–1)",
-    position=0.97, range=[0, 1]
-)
-
-def add_aux_traces(to_yaxis="y3", show_emac_curve_raw=False, show_emac_curve_adj=False,
-                   show_emac_points_raw=False, show_emac_points_adj=False):
-    if use_ciec:
-        fig.add_trace(go.Scatter(x=df_ciec["fecha"], y=df_ciec["Ciec"], mode="lines", name="Ciec", yaxis=to_yaxis))
-    if show_emac_curve_raw and len(work_base):
-        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="lines",
-                                 name="EMERAC (curva) cruda", yaxis=to_yaxis))
-    # En esta versión “sin ICIC” no hay curva “ajustada” por ICIC; mantenemos solo cruda/puntos crudos.
-    if show_emac_points_raw and len(work_base):
-        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="markers",
-                                 name="EMERAC (puntos) cruda", yaxis=to_yaxis, marker=dict(size=6)))
-
-add_aux_traces("y3", show_emac_curve_raw, False, show_emac_points_raw, False)
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
@@ -594,7 +568,7 @@ st.markdown(
 """
 )
 
-# =================== Gráfico: Pérdida (%) vs A2 (pl·m²) ==============
+# =================== Gráfico 2: Pérdida (%) vs A2 (pl·m²) =============
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
 
@@ -683,3 +657,4 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
+
