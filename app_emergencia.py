@@ -1,17 +1,7 @@
 # -*- coding: utf-8 -*-
-# app.py — PREDWEEM · Manejo manual con ICIC + Ciec + Control (NR=10d por defecto)
-# - Ventana de siembra e ICIC dinámico (ICIC(siem.)=0)
-# - Ciec(t) = (LAI/LAIhc) * (Cs/Ca), truncado a [0,1]
-# - EMERAC cruda/ajustada opcional (curva/puntos)
-# - Bandas: residual (rango 30–60d; etiquetas opcionales)
-#           y NO residuales: por defecto 10 días (pre NR y post graminicida)
-# - Eficiencias de control (%) por medida; combinación multiplicativa de solapamientos
-#   · Residuales con opción de decaimiento: Ninguno / Lineal / Exponencial (t1/2)
-# - Conversión EMERREL → plantas·m²: pico(EMERREL_cruda) ≙ 350 pl·m²
-# - Figura principal: EMERREL (izq), Plantas·m² (derecha opcional),
-#   y eje derecho adicional (0–1) para ICIC/Ciec/EMERAC
-# - Series exportables (incluyendo versiones “control”)
-# - ***CAMBIO: reemplazado “EMERREL × Ciec” por “EMERREL × (1 − Ciec)” (supresión)***
+# app.py — PREDWEEM · ICIC + Ciec (supresión) + Control (NR=10d por defecto)
+# - EMERREL × (1 − Ciec) (supresión) + versiones con control post
+# - Totales de escapes en plantas·m² y acumuladas para exportación
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -22,10 +12,10 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · ICIC + Ciec (supresión) + Control (NR=10d)"
+APP_TITLE = "PREDWEEM · ICIC + supresión (1−Ciec) + Control"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional. *Usa supresión: EMERREL × (1 − Ciec).*")
+st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional. Usa supresión: EMERREL × (1 − Ciec).")
 
 # ========================== Constantes clave ==========================
 NR_DAYS_DEFAULT = 10  # no residuales
@@ -107,9 +97,8 @@ def compute_icic(
     row_cm: float, row_ref: float,
 ):
     """
-    Calcula ICIC en [0,1] sobre 'fechas' con arranque en 0 el día de la siembra.
-    Devuelve: ICIC, FC (cobertura 0–1), LAI (m²/m²).
-    ICIC = (alpha*FC + beta*F_d + gamma*F_s - offset) / (1 - offset), offset = beta*F_d + gamma*F_s
+    ICIC = (alpha*FC + beta*F_d + gamma*F_s - offset) / (1 - offset),
+    offset = beta*F_d + gamma*F_s ; truncado a [0,1]
     """
     days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
 
@@ -145,7 +134,6 @@ def compute_icic(
     den = max(1e-6, 1.0 - offset)
     icic = (icic_bruto - offset) / den
     icic = np.clip(icic, 0.0, 1.0)
-
     return icic, fc_dyn, LAI
 
 # ========================= Sidebar: datos base =========================
@@ -194,7 +182,6 @@ with st.expander("Seleccionar columnas y depurar datos", expanded=True):
     vals = clean_numeric_series(df0[c_valor], decimal=dec_for_col)
 
     df = pd.DataFrame({"fecha": fechas, "valor": vals}).dropna().sort_values("fecha").reset_index(drop=True)
-
     if df.empty:
         st.error("Tras el parseo no quedaron filas válidas (fechas/valores NaN)."); st.stop()
 
@@ -217,7 +204,6 @@ with st.expander("Seleccionar columnas y depurar datos", expanded=True):
     if is_cumulative:
         emerrel = emerrel.diff().fillna(0.0).clip(lower=0.0)
     emerrel = emerrel.clip(lower=0.0)
-
     df_plot = pd.DataFrame({"fecha": pd.to_datetime(df["fecha"]), "EMERREL": emerrel})
 
 # ==================== Siembra & parámetros ICIC ========================
@@ -251,7 +237,7 @@ with st.sidebar:
     use_ciec = st.checkbox("Calcular y mostrar Ciec", value=True)
     Ca = st.number_input("Densidad real Ca (pl/m²)", 50, 700, 250, 10)
     Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
-    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)
+    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)  # default 3.5
 
 # =========== Etiquetas/visual + avanzadas (EMERAC y barras) ===========
 with st.sidebar:
@@ -281,10 +267,8 @@ ICIC, FC, LAI = compute_icic(
     dens=float(dens), dens_ref=float(dens_ref),
     row_cm=float(row_cm), row_ref=float(row_ref),
 )
-
-# asegurar ICIC(siem.)=0 incluso si t_lag=0
 if len(ICIC):
-    ICIC[0] = 0.0
+    ICIC[0] = 0.0  # asegurar ICIC(siem.)=0
 
 if use_ciec:
     Ca_safe = float(Ca) if float(Ca) > 0 else 1e-6
@@ -457,6 +441,10 @@ else:
     plantas_eff_ctrl = np.full(len(df_plot), np.nan)
     plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
 
+# ======= Totales de escapes (plantas·m²) =======
+N_escape_sup = float(np.nansum(plantas_supresion)) if has_factor else float("nan")
+N_escape_sup_ctrl = float(np.nansum(plantas_supresion_ctrl)) if has_factor else float("nan")
+
 # ============================== Gráfico ===============================
 fig = go.Figure()
 
@@ -477,7 +465,6 @@ fig.add_trace(go.Scatter(
     customdata=cd_eff,
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL (ef): %{y:.4f}<br>Plantas·m² (ef): %{customdata[0]:.1f}<extra></extra>"
 ))
-# Controladas (ICIC)
 fig.add_trace(go.Scatter(
     x=df_eff["fecha"], y=emerrel_eff_ctrl, mode="lines",
     name="EMERREL (ef·ICIC·control)", line=dict(dash="solid", width=2)
@@ -521,12 +508,10 @@ if t_star is not None:
 
 # Helpers de bandas
 def _add_label(center_ts, text, bgcolor, y=0.94):
-    fig.add_annotation(
-        x=center_ts, y=y, xref="x", yref="paper",
-        text=text, showarrow=False,
-        bgcolor=bgcolor, opacity=0.9,
-        bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2
-    )
+    fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
+        text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
+        bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
+
 def add_residual_band(start_date, days, label):
     if start_date is None or days is None: return
     try:
@@ -539,6 +524,7 @@ def add_residual_band(start_date, days, label):
             _add_label(x0 + (x1 - x0)/2, label, "rgba(219,112,147,0.8)")
     except Exception:
         return
+
 def add_one_day_band(date_val, label):
     if date_val is None: return
     try:
@@ -553,7 +539,6 @@ def add_one_day_band(date_val, label):
 # Bandas residuales (pre/post R) y NR=10d para selectivos NO residuales
 if pre_selR:  add_residual_band(pre_selR_date, pre_res_dias, f"Residual pre {pre_res_dias}d")
 if post_selR: add_residual_band(post_selR_date, post_res_dias, f"Residual post {post_res_dias}d")
-
 if show_nonres_bands:
     if pre_glifo: add_one_day_band(pre_glifo_date, "Glifo (1d)")
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
@@ -611,6 +596,15 @@ fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
 st.caption(f"{conv_caption} · No residuales con NR por defecto = {NR_DAYS_DEFAULT} días.")
 
+# ======================= Totales visibles en UI =======================
+st.subheader("Plantas·m² que escapan")
+st.markdown(
+    f"""
+**Solo supresión (1−Ciec):** **{N_escape_sup:,.1f}** pl·m²  
+**Supresión + control post:** **{N_escape_sup_ctrl:,.1f}** pl·m²
+"""
+)
+
 # ============================== Cronograma ============================
 st.subheader("Cronograma de manejo (manual)")
 if len(sched):
@@ -633,24 +627,33 @@ if has_factor:
     out["Plantas_m2_est_supresion"]        = np.round(plantas_supresion, 1)
     out["Plantas_m2_est_ef_ctrl"]          = np.round(plantas_eff_ctrl, 1)
     out["Plantas_m2_est_supresion_ctrl"]   = np.round(plantas_supresion_ctrl, 1)
+    # nuevas columnas acumuladas:
+    out["Plantas_m2_supresion_acum"]       = np.round(np.nancumsum(plantas_supresion), 1)
+    out["Plantas_m2_supresion_ctrl_acum"]  = np.round(np.nancumsum(plantas_supresion_ctrl), 1)
 else:
     out["Plantas_m2_est_cruda"] = np.nan
     out["Plantas_m2_est_ef"]    = np.nan
     out["Plantas_m2_est_supresion"] = np.nan
     out["Plantas_m2_est_ef_ctrl"] = np.nan
     out["Plantas_m2_est_supresion_ctrl"] = np.nan
+    out["Plantas_m2_supresion_acum"] = np.nan
+    out["Plantas_m2_supresion_ctrl_acum"] = np.nan
 
 with st.expander("Descargas de series", expanded=True):
     st.caption(conv_caption)
     only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m²", value=False)
 
-    default_cols = ["fecha", "EMERREL", "EMERREL_eff", "EMERREL_supresion",
-                    "EMERREL_eff_ctrl", "EMERREL_supresion_ctrl",
-                    "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_supresion",
-                    "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_supresion_ctrl"]
+    default_cols = [
+        "fecha",
+        "EMERREL", "EMERREL_eff", "EMERREL_supresion",
+        "EMERREL_eff_ctrl", "EMERREL_supresion_ctrl",
+        "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_supresion",
+        "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_supresion_ctrl",
+        "Plantas_m2_supresion_acum", "Plantas_m2_supresion_ctrl_acum"
+    ]
     available_cols = [c for c in default_cols if c in out.columns] + [c for c in out.columns if c not in default_cols]
     preselect = [c for c in available_cols if c.startswith("Plantas_m2")] if only_plants else [c for c in available_cols if c in default_cols]
-    selected_cols = st.multiselect("Columnas a incluir en la tabla y el CSV:", available_cols, default=preselect)
+    selected_cols = st.multiselect("Columnas a incluir en la tabla y el CSV:", available_cols, default=preselect or default_cols)
 
     if not selected_cols:
         st.info("Seleccioná al menos una columna para mostrar/descargar.")
@@ -671,6 +674,8 @@ diag = {
     "suma_EMERREL_ef_ctrl": float(np.nansum(emerrel_eff_ctrl)),
     "suma_EMERREL_supresion": float(np.nansum(emerrel_supresion)),
     "suma_EMERREL_supresion_ctrl": float(np.nansum(emerrel_supresion_ctrl)),
+    "N_escape_sup_pl_m2": N_escape_sup,
+    "N_escape_sup_y_control_pl_m2": N_escape_sup_ctrl,
     "tot_base": float(tot_base),
     "tot_ajustada": float(tot_star),
     "pico_EMERREL": float(df_plot["EMERREL"].max()),
