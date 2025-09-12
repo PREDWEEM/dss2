@@ -241,20 +241,21 @@ with st.sidebar:
     use_ciec = st.checkbox("Calcular y mostrar Ciec", value=True)
     Ca = st.number_input("Densidad real Ca (pl/m²)", 50, 700, 250, 10)
     Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
-    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)  # default 3.5
+    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)
 
 # =========== Etiquetas/visual + avanzadas (EMERAC y barras) ===========
 with st.sidebar:
     st.header("Etiquetas y escalas")
+    show_plants_axis = st.checkbox("Mostrar Plantas·m² en eje derecho", value=False)
+    show_sup_density = st.checkbox("Barras de Plantas·m² (si eje derecho activo)", value=False)
     highlight_labels = st.checkbox("Etiquetas destacadas en bandas", value=True)
-    show_plants_axis = st.checkbox("Mostrar segunda escala derecha en Plantas·m² (supresión)", value=True)
+
     st.header("Visualización avanzada")
     show_emac_curve_raw = st.checkbox("Mostrar EMERAC (curva) cruda", value=False)
     show_emac_curve_adj = st.checkbox("Mostrar EMERAC (curva) ajustada", value=False)
     show_emac_points_raw = st.checkbox("Mostrar EMERAC (puntos) cruda", value=False)
     show_emac_points_adj = st.checkbox("Mostrar EMERAC (puntos) ajustada", value=False)
     show_nonres_bands = st.checkbox("Marcar bandas NR (por defecto 10 días)", value=True)
-    show_sup_density = st.checkbox("Barras de Plantas·m² de supresión", value=False)
 
 if not (sow_min <= sow_date <= sow_max):
     st.error("La fecha de siembra debe estar entre el 1 de mayo y el 1 de julio."); st.stop()
@@ -511,24 +512,6 @@ fig.add_trace(go.Scatter(
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión (ctrl): %{y:.4f}<br>Plantas·m² (sup. ctrl): %{customdata[0]:.1f}<extra></extra>"
 ))
 
-# ICIC / Ciec / EMERAC (eje secundario de indicadores)
-def add_icic_emac_traces(to_yaxis="y2", show_raw=False, show_adj=False, show_pr=False, show_padj=False):
-    fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["ICIC"], mode="lines", name="ICIC", yaxis=to_yaxis))
-    if use_ciec:
-        fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["Ciec"], mode="lines", name="Ciec", yaxis=to_yaxis))
-    if show_raw and len(work_base):
-        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="lines",
-                                 name="EMERAC (curva) cruda", yaxis=to_yaxis))
-    if show_adj and len(work_star):
-        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="lines",
-                                 name="EMERAC (curva) ajustada", yaxis=to_yaxis, line=dict(dash="dash")))
-    if show_pr and len(work_base):
-        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="markers",
-                                 name="EMERAC (puntos) cruda", yaxis=to_yaxis, marker=dict(size=6)))
-    if show_padj and len(work_star):
-        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="markers",
-                                 name="EMERAC (puntos) ajustada", yaxis=to_yaxis, marker=dict(size=6, symbol="x")))
-
 # Sombrear t*
 if t_star is not None:
     fig.add_vrect(x0=t_star, x1=df_plot["fecha"].max(), fillcolor="LightGreen", opacity=0.15,
@@ -582,20 +565,62 @@ layout_kwargs = dict(
     yaxis=dict(range=[0, ymax])
 )
 
-# Eje derecho: Plantas·m² SOLO supresión
+# Eje derecho opcional: Plantas·m² (líneas + opcional barras)
 if show_plants_axis and (factor_sup is not None) and np.isfinite(factor_sup):
     plantas_max = float(np.nanmax([np.nanmax(plantas_supresion), np.nanmax(plantas_supresion_ctrl)]))
     if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = 1.0
+
     layout_kwargs["yaxis2"] = dict(
-        overlaying="y", side="right", title="Plantas·m² (supresión)", position=1.0,
+        overlaying="y",
+        side="right",
+        title="Plantas·m² (supresión)",
+        position=1.0,
         range=[0, plantas_max*1.15]
     )
+
+    # Líneas de densidad (y2)
+    fig.add_trace(go.Scatter(
+        x=df_plot["fecha"], y=plantas_supresion,
+        name="Plantas·m² × (1−Ciec)",
+        yaxis="y2", mode="lines",
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup.): %{y:.1f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=df_plot["fecha"], y=plantas_supresion_ctrl,
+        name="Plantas·m² × (1−Ciec) (control)",
+        yaxis="y2", mode="lines",
+        line=dict(dash="dot"),
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup. ctrl): %{y:.1f}<extra></extra>"
+    ))
+
+    # Barras opcionales (y2)
     if show_sup_density:
-        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion,      name="Plantas·m² × (1−Ciec)",            yaxis="y2", opacity=0.35)
-        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion_ctrl, name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", opacity=0.35)
+        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion,
+                    name="Plantas·m² × (1−Ciec) (barras)", yaxis="y2", opacity=0.3)
+        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion_ctrl,
+                    name="Plantas·m² × (1−Ciec) (control, barras)", yaxis="y2", opacity=0.3)
 
 # Eje de indicadores (ICIC/Ciec/EMERAC)
-layout_kwargs["yaxis3"] = dict(overlaying="y", side="right", title="ICIC / Ciec / EMERAC (0–1)", position=0.97, range=[0, 1])
+layout_kwargs["yaxis3"] = dict(
+    overlaying="y", side="right", title="ICIC / Ciec / EMERAC (0–1)",
+    position=0.97, range=[0, 1]
+)
+def add_icic_emac_traces(to_yaxis="y3", show_raw=False, show_adj=False, show_pr=False, show_padj=False):
+    fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["ICIC"], mode="lines", name="ICIC", yaxis=to_yaxis))
+    if use_ciec:
+        fig.add_trace(go.Scatter(x=df_ic["fecha"], y=df_ic["Ciec"], mode="lines", name="Ciec", yaxis=to_yaxis))
+    if show_raw and len(work_base):
+        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="lines",
+                                 name="EMERAC (curva) cruda", yaxis=to_yaxis))
+    if show_adj and len(work_star):
+        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="lines",
+                                 name="EMERAC (curva) ajustada", yaxis=to_yaxis, line=dict(dash="dash")))
+    if show_pr and len(work_base):
+        fig.add_trace(go.Scatter(x=work_base["fecha"], y=work_base["EMERAC_N"], mode="markers",
+                                 name="EMERAC (puntos) cruda", yaxis=to_yaxis, marker=dict(size=6)))
+    if show_padj and len(work_star):
+        fig.add_trace(go.Scatter(x=work_star["fecha"], y=work_star["EMERAC_N"], mode="markers",
+                                 name="EMERAC (puntos) ajustada", yaxis=to_yaxis, marker=dict(size=6, symbol="x")))
 add_icic_emac_traces("y3", show_emac_curve_raw, show_emac_curve_adj, show_emac_points_raw, show_emac_points_adj)
 
 fig.update_layout(**layout_kwargs)
@@ -620,7 +645,8 @@ with st.expander("Ver sumas quincenales (bloques de 15 días)", expanded=False):
         st.download_button(
             "Descargar sumas quincenales (CSV)",
             agg_q.to_csv(index=False).encode("utf-8"),
-            "sumas_quincenales.csv", "text/csv"
+            "sumas_quincenales.csv",
+            "text/csv"
         )
     else:
         st.info("No hay días ≥ siembra para calcular bloques quincenales.")
@@ -774,3 +800,4 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
+
