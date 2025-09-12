@@ -174,8 +174,8 @@ except Exception as e:
 # st.dataframe(df0.head(15), use_container_width=True)
 
 # ===================== Selección de columnas ===========================
-cols = list(df0.columns)
-with st.expander("Seleccionar columnas y depurar datos", expanded=True):
+# cols = list(df0.columns)
+# with st.expander("Seleccionar columnas y depurar datos", expanded=True):
     c_fecha = st.selectbox("Columna de fecha", cols, index=0)
     c_valor = st.selectbox("Columna de valor (EMERREL diaria o EMERAC)", cols, index=1 if len(cols)>1 else 0)
 
