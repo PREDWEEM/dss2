@@ -3,7 +3,7 @@
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI), con curva opcional
 # - Conversión a Plantas·m² anclada al pico de EMERREL (cruda) → 250 pl·m²
-# - A2 = PROMEDIO de valores INSTANTÁNEOS SEMANALES (ventanas de 7 días desde siembra), con TOPE 250
+# - A2 = SUMA de valores INSTANTÁNEOS MENSUALES (1 por mes calendario desde siembra), con TOPE 250
 # - Pérdida de rinde calculada con A2 topeado
 # - Eje derecho: incluye "EMERREL→Plantas·m² (cruda)" y escala que siempre contiene 250
 
@@ -19,7 +19,7 @@ from datetime import timedelta
 APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("Plantas·m², PROMEDIO semanal y pérdida de rinde se basan en EMERREL × (1 − Ciec) (y su versión con control). No se calcula ICIC.")
+st.caption("Plantas·m², checkpoints mensuales y pérdida de rinde se basan en EMERREL × (1 − Ciec) (y su versión con control). No se calcula ICIC.")
 
 # ========================== Constantes clave ==========================
 NR_DAYS_DEFAULT = 10
@@ -176,9 +176,9 @@ with st.expander("Seleccionar columnas y depurar datos", expanded=True):
 
     if df["fecha"].duplicated().any():
         if dedup == "sumar":
-            df = df.groupby("fecha", as_index=False)["valor"].sum()
+            df = df.groupby("fecha,").sum(numeric_only=True).rename_axis("fecha").reset_index()
         elif dedup == "promediar":
-            df = df.groupby("fecha", as_index=False)["valor"].mean()
+            df = df.groupby("fecha,").mean(numeric_only=True).rename_axis("fecha").reset_index()
         else:
             df = df.drop_duplicates(subset=["fecha"], keep="first")
 
@@ -407,43 +407,25 @@ if use_ciec:
 plantas_supresion = (emerrel_supresion * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
 plantas_supresion_ctrl = (emerrel_supresion_ctrl * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
 
-# ======= SEMANALES: PROMEDIO de valores instantáneos desde siembra =======
+# ======= MENSUALES: SUMA de valores instantáneos (1 por mes) ==========
 ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
-days_since = (ts_norm - pd.Timestamp(sow_date)).dt.days
+mask_after_sow = ts_norm.dt.date >= sow_date
 
-mask_after_sow = days_since >= 0
-df_w = pd.DataFrame({
+df_m = pd.DataFrame({
     "fecha": ts_norm,
-    "dias_desde_siembra": days_since,
     "Plantas_m2_supresion": plantas_supresion,
     "Plantas_m2_supresion_ctrl": plantas_supresion_ctrl
-}).loc[mask_after_sow].copy()
-
-if len(df_w):
-    # índice de semana desde siembra: 0 = [0..6], 1 = [7..13], etc.
-    df_w["semana_idx"] = (df_w["dias_desde_siembra"] // 7).astype(int)
-
-    # promedio semanal (instantáneo promedio de cada ventana de 7 días)
-    df_semanal = (df_w
-        .groupby("semana_idx", as_index=False)
-        .agg(
-            fecha_inicio=("fecha", "min"),
-            fecha_fin=("fecha", "max"),
-            Plantas_m2_supresion_sem=("Plantas_m2_supresion", "mean"),
-            Plantas_m2_supresion_ctrl_sem=("Plantas_m2_supresion_ctrl", "mean"),
-        )
-        .sort_values("semana_idx")
-        .reset_index(drop=True)
-    )
-
-    # A2 = PROMEDIO de los promedios semanales (un solo valor), luego tope
-    A2_sup_raw  = float(np.nanmean(df_semanal["Plantas_m2_supresion_sem"])) \
-                  if "Plantas_m2_supresion_sem" in df_semanal else float("nan")
-    A2_ctrl_raw = float(np.nanmean(df_semanal["Plantas_m2_supresion_ctrl_sem"])) \
-                  if "Plantas_m2_supresion_ctrl_sem" in df_semanal else float("nan")
+})
+df_m = df_m.loc[mask_after_sow].copy()
+if len(df_m):
+    df_m["ym"] = df_m["fecha"].dt.to_period("M")
+    idx_first_of_month = df_m.groupby("ym")["fecha"].idxmin()
+    df_mensual = df_m.loc[idx_first_of_month].sort_values("fecha").reset_index(drop=True)
 else:
-    df_semanal = df_w.copy()
-    A2_sup_raw, A2_ctrl_raw = float("nan"), float("nan")
+    df_mensual = df_m.copy()
+
+A2_sup_raw  = float(np.nansum(df_mensual["Plantas_m2_supresion"])) if "Plantas_m2_supresion" in df_mensual else float("nan")
+A2_ctrl_raw = float(np.nansum(df_mensual["Plantas_m2_supresion_ctrl"])) if "Plantas_m2_supresion_ctrl" in df_mensual else float("nan")
 
 A2_sup_final  = min(MAX_PLANTS_CAP, A2_sup_raw)  if np.isfinite(A2_sup_raw)  else float("nan")
 A2_ctrl_final = min(MAX_PLANTS_CAP, A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else float("nan")
@@ -488,8 +470,7 @@ def add_residual_band(start_date, days, label):
         x0 = pd.to_datetime(start_date)
         x1 = x0 + pd.Timedelta(days=d_int)
         fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="PaleVioletRed", opacity=0.15)
-        if highlight_labels:
-            _add_label(x0 + (x1 - x0)/2, label, "rgba(219,112,147,0.8)")
+        _add_label(x0 + (x1 - x0)/2, label, "rgba(219,112,147,0.8)")
     except Exception:
         return
 
@@ -498,8 +479,7 @@ def add_one_day_band(date_val, label):
     try:
         x0 = pd.to_datetime(date_val); x1 = x0 + pd.Timedelta(days=1)
         fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="Gold", opacity=0.25)
-        if highlight_labels:
-            _add_label(x0 + (x1 - x0)/2, label, "rgba(255,215,0,0.85)")
+        _add_label(x0 + (x1 - x0)/2, label, "rgba(255,215,0,0.85)")
     except Exception:
         return
 
@@ -528,10 +508,8 @@ layout_kwargs = dict(
 
 # ========= Eje derecho opcional: Plantas·m² (incluye 250 siempre) ========
 if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
-    # EMERREL (cruda) → Plantas·m² (pico debe ser 250)
     plantas_emerrel_cruda = df_plot["EMERREL"].values * factor_pl
 
-    # Escala del eje y2: asegurar que 250 esté incluido
     candidatos = [
         np.nanmax(plantas_supresion),
         np.nanmax(plantas_supresion_ctrl),
@@ -552,20 +530,17 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
         dtick=50
     )
 
-    # Curva EMERREL→Plantas·m² (para ver el pico=250)
     fig.add_trace(go.Scatter(
         x=df_plot["fecha"], y=plantas_emerrel_cruda,
         name="EMERREL→Plantas·m² (cruda)",
         yaxis="y2", mode="lines", line=dict(width=1),
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL→Plantas·m²: %{y:.1f}<extra></extra>"
     ))
-    # Supresión en plantas·m²
     fig.add_trace(go.Scatter(
         x=df_plot["fecha"], y=plantas_supresion,
         name="Plantas·m² × (1−Ciec)", yaxis="y2", mode="lines",
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup.): %{y:.1f}<extra></extra>"
     ))
-    # Supresión + control en plantas·m²
     fig.add_trace(go.Scatter(
         x=df_plot["fecha"], y=plantas_supresion_ctrl,
         name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", mode="lines",
@@ -574,7 +549,7 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
     ))
 
 # Eje auxiliar y curva Ciec (opcional)
-if use_ciec and show_ciec_curve:
+if use_ciec:
     layout_kwargs["yaxis3"] = dict(
         overlaying="y", side="right", title="Ciec (0–1)", position=0.97, range=[0, 1]
     )
@@ -585,41 +560,30 @@ if use_ciec and show_ciec_curve:
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
-st.caption(f"{conv_caption} · NR por defecto = {NR_DAYS_DEFAULT} días · A2 = PROMEDIO de valores instantáneos SEMANALES (7 días desde siembra), con tope máx = {MAX_PLANTS_CAP:.0f} pl·m².")
+st.caption(f"{conv_caption} · NR por defecto = {NR_DAYS_DEFAULT} días · A2 (mensual) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m² (sumatoria de checkpoints mensuales).")
 
-# ======================= A2 en UI (PROMEDIO SEMANAL con tope) ==========
-st.subheader("Plantas·m² que escapan — PROMEDIO SEMANAL (con tope)")
+# ======================= A2 en UI (SUMA MENSUAL con tope) =============
+st.subheader("Plantas·m² que escapan — Sumatoria MENSUAL (con tope)")
 st.markdown(
     f"""
-**Promedio — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
-**Promedio — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
+**Sumatoria — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
+**Sumatoria — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
 
-with st.expander("Ver promedios semanales (ventanas de 7 días desde siembra)", expanded=False):
-    if len(df_semanal):
-        df_show = df_semanal[[
-            "semana_idx","fecha_inicio","fecha_fin",
-            "Plantas_m2_supresion_sem","Plantas_m2_supresion_ctrl_sem"
-        ]].copy()
-        df_show["fecha_inicio"] = pd.to_datetime(df_show["fecha_inicio"]).dt.date
-        df_show["fecha_fin"] = pd.to_datetime(df_show["fecha_fin"]).dt.date
-        df_show = df_show.rename(columns={
-            "semana_idx": "Semana",
-            "fecha_inicio": "Inicio",
-            "fecha_fin": "Fin",
-            "Plantas_m2_supresion_sem": "Plantas·m² (sup.) prom. semanal",
-            "Plantas_m2_supresion_ctrl_sem": "Plantas·m² (sup.+ctrl) prom. semanal"
-        })
-        st.dataframe(df_show, use_container_width=True)
+with st.expander("Ver checkpoints mensuales (instantáneos)", expanded=False):
+    if len(df_mensual):
+        df_mensual_show = df_mensual[["fecha","Plantas_m2_supresion","Plantas_m2_supresion_ctrl"]].copy()
+        df_mensual_show["fecha"] = pd.to_datetime(df_mensual_show["fecha"]).dt.date
+        st.dataframe(df_mensual_show, use_container_width=True)
         st.download_button(
-            "Descargar promedios semanales (CSV)",
-            df_show.to_csv(index=False).encode("utf-8"),
-            "promedios_semanales.csv",
+            "Descargar checkpoints mensuales (CSV)",
+            df_mensual_show.to_csv(index=False).encode("utf-8"),
+            "checkpoints_mensuales.csv",
             "text/csv"
         )
     else:
-        st.info("No hay semanas calculadas (revisá el rango de fechas y la siembra).")
+        st.info("No hay checkpoints mensuales (revisá el rango de fechas y la siembra).")
 
 # ======================= Pérdida de rendimiento (%) ===================
 def perdida_rinde_pct(A2):
@@ -659,7 +623,7 @@ if np.isfinite(A2_ctrl_final):
 
 fig_loss.update_layout(
     title="Pérdida de rendimiento (%) vs. A2 (pl·m²)",
-    xaxis_title="A2 (pl·m²) — PROMEDIO semanal (tope 250)",
+    xaxis_title="A2 (pl·m²) — sumatoria mensual (tope 250)",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
 )
@@ -681,18 +645,35 @@ out["EMERREL_supresion_ctrl"]      = emerrel_supresion_ctrl
 out["Plantas_m2_supresion"]        = np.round(plantas_supresion, 1)
 out["Plantas_m2_supresion_ctrl"]   = np.round(plantas_supresion_ctrl, 1)
 
+# columnas mensuales (solo las fechas checkpoint)
+if len(df_mensual):
+    mcols = df_mensual[["fecha","Plantas_m2_supresion","Plantas_m2_supresion_ctrl"]].copy()
+    mcols.columns = ["fecha_mensual","Plantas_m2_supresion_M","Plantas_m2_supresion_ctrl_M"]
+else:
+    mcols = pd.DataFrame(columns=["fecha_mensual","Plantas_m2_supresion_M","Plantas_m2_supresion_ctrl_M"])
+
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + f" · A2 (PROMEDIO semanal) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m²")
+    st.caption(conv_caption + f" · A2 (mensual) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m² · A2 = suma de checkpoints mensuales")
+    only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m² (supresión)", value=False)
+
     default_cols = [
         "fecha",
         "EMERREL_supresion", "EMERREL_supresion_ctrl",
         "Plantas_m2_supresion", "Plantas_m2_supresion_ctrl",
     ]
     out_show = out[default_cols].copy()
+    if len(mcols):
+        # Se muestran aparte los checkpoints mensuales en el CSV adicional
+        pass
+
     st.dataframe(out_show.tail(20), use_container_width=True)
     st.download_button("Descargar serie procesada (CSV)",
                        out_show.to_csv(index=False).encode("utf-8"),
                        "serie_procesada.csv", "text/csv")
+    if len(mcols):
+        st.download_button("Descargar checkpoints mensuales (CSV)",
+                           mcols.to_csv(index=False).encode("utf-8"),
+                           "checkpoints_mensuales.csv", "text/csv")
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
@@ -704,9 +685,9 @@ diag = {
     "target_pl_m2": MAX_PLANTS_CAP,
     "suma_supresion_EMERRELx(1-Ciec)": float(np.nansum(emerrel_supresion)),
     "suma_supresion_ctrl_EMERRELx(1-Ciec)xcontrol": float(np.nansum(emerrel_supresion_ctrl)),
-    # A2 por PROMEDIO semanal
-    "A2_sup_raw_prom_semanal": A2_sup_raw,
-    "A2_sup_ctrl_raw_prom_semanal": A2_ctrl_raw,
+    # A2 por sumatoria de checkpoints mensuales
+    "A2_sup_raw_sum_mensual": A2_sup_raw,
+    "A2_sup_ctrl_raw_sum_mensual": A2_ctrl_raw,
     "A2_sup_cap": A2_sup_final,
     "A2_sup_ctrl_cap": A2_ctrl_final,
     # Ciec
