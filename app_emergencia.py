@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d por defecto)
 # - Sin ICIC: NO se calculan ICIC ni variantes "ef ICIC"
-# - Cálculo de Ciec desde canopia (FC/LAI) sin ICIC
+# - Ciec desde canopia (FC/LAI), con curva opcional en el gráfico
 # - Conversión a Plantas·m² anclada al pico de la SUPRESIÓN (→ 250 pl·m²)
 # - A2 = SUMA de valores INSTANTÁNEOS QUINCENALES (cada 15 días desde siembra), con TOPE 250
 # - Pérdida de rinde calculada con A2 (topeado)
@@ -225,6 +225,7 @@ with st.sidebar:
     st.header("Etiquetas y escalas")
     show_plants_axis = st.checkbox("Mostrar Plantas·m² en eje derecho", value=False)
     show_sup_density = st.checkbox("Barras de Plantas·m² (si eje derecho activo)", value=False)
+    show_ciec_curve = st.checkbox("Mostrar curva Ciec (0–1)", value=True)
     highlight_labels = st.checkbox("Etiquetas destacadas en bandas", value=True)
 
     st.header("Visualización avanzada")
@@ -250,8 +251,6 @@ else:
     Ciec = np.full_like(LAI, np.nan, dtype=float)
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
-
-# Opcional: EMERAC (solo visual) si se activa
 _, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 
 # ===== SUPRESIÓN (base de toda la parte agronómica) ===================
@@ -398,25 +397,19 @@ plantas_supresion_ctrl = (emerrel_supresion_ctrl * factor_sup) if (factor_sup is
 # ======= QUINCENALES (cada 15 días desde siembra): SUMA de valores instantáneos =======
 ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
 days_since = (ts_norm - pd.Timestamp(sow_date)).dt.days
-
-# Checkpoints quincenales: 0, 15, 30, ...
 mask_q = (days_since >= 0) & (days_since % 15 == 0)
 
-# Valores instantáneos en checkpoints (sobrevivientes)
 Q_sup_vals      = plantas_supresion.copy()
 Q_sup_ctrl_vals = plantas_supresion_ctrl.copy()
 Q_sup_vals[~mask_q]      = np.nan
 Q_sup_ctrl_vals[~mask_q] = np.nan
 
-# SUMATORIA de checkpoints (A2 "raw")
 A2_sup_raw  = float(np.nansum(Q_sup_vals))
 A2_ctrl_raw = float(np.nansum(Q_sup_ctrl_vals))
 
-# Aplicar TOPE 250 pl·m² al total
 A2_sup_final  = min(MAX_PLANTS_CAP, A2_sup_raw)  if np.isfinite(A2_sup_raw)  else float("nan")
 A2_ctrl_final = min(MAX_PLANTS_CAP, A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else float("nan")
 
-# Tabla de checkpoints quincenales (para UI/descarga)
 df_quince = pd.DataFrame({
     "fecha": ts_norm,
     "dias_desde_siembra": days_since,
@@ -427,14 +420,14 @@ df_quince = pd.DataFrame({
 # ============================== Gráfico 1 ==============================
 fig = go.Figure()
 
-# 1) EMERREL cruda (informativa)
+# EMERREL cruda
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=df_plot["EMERREL"], mode="lines",
     name="EMERREL (cruda)",
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL: %{y:.4f}<extra></extra>"
 ))
 
-# 2) Supresión (base para plantas y rinde)
+# Supresión base
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=emerrel_supresion, mode="lines",
     name="EMERREL × (1 − Ciec)", line=dict(dash="dashdot"),
@@ -442,7 +435,7 @@ fig.add_trace(go.Scatter(
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión: %{y:.4f}<br>Plantas·m² (sup.): %{customdata[0]:.1f}<extra></extra>"
 ))
 
-# 3) Supresión + control
+# Supresión + control
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=emerrel_supresion_ctrl, mode="lines",
     name="EMERREL × (1 − Ciec) (control)", line=dict(dash="dot", width=2),
@@ -496,7 +489,7 @@ ymax = max(1e-6, ymax * 1.15)
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title="EMERREL + Supresión (1−Ciec) + Control",
+    title="EMERREL + Supresión (1−Ciec) + Control" + (" + Ciec" if True else ""),
     xaxis_title="Fecha",
     yaxis_title="EMERREL / Supresión",
     yaxis=dict(range=[0, ymax])
@@ -525,6 +518,24 @@ if show_plants_axis and (factor_sup is not None) and np.isfinite(factor_sup):
         name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", mode="lines",
         line=dict(dash="dot"),
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup. ctrl): %{y:.1f}<extra></extra>"
+    ))
+
+# --- Eje auxiliar y curva Ciec (opcional) ---
+if show_ciec_curve:
+    layout_kwargs["yaxis3"] = dict(
+        overlaying="y",
+        side="right",
+        title="Ciec (0–1)",
+        position=0.97,
+        range=[0, 1]
+    )
+    fig.add_trace(go.Scatter(
+        x=df_ciec["fecha"],
+        y=df_ciec["Ciec"],
+        mode="lines",
+        name="Ciec",
+        yaxis="y3",
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Ciec: %{y:.2f}<extra></extra>"
     ))
 
 fig.update_layout(**layout_kwargs)
@@ -657,4 +668,3 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
-
