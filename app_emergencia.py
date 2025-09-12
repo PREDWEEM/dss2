@@ -251,7 +251,7 @@ with st.sidebar:
     use_ciec = st.checkbox("Calcular y mostrar Ciec", value=True)
     Ca = st.number_input("Densidad real Ca (pl/m²)", 50, 700, 250, 10)
     Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
-    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 6.0, 0.1)
+    LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)
 
 # =========== Etiquetas/visual + avanzadas (EMERAC y barras) ===========
 with st.sidebar:
