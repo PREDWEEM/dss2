@@ -4,6 +4,7 @@
 # - Conversión EMERREL→plantas·m² con tope máx 250 pl·m²
 # - Totales de escapes SOLO QUINCENALES (con tope, agregación real por bloques de 15 días)
 # - Series exportables (incluye tabla quincenal agregada) + diagnóstico
+# - Refresco de datos: botón de recarga + cache con TTL=60s
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -33,7 +34,7 @@ def sniff_sep_dec(text: str):
         dec_guess = ","
     return sep_guess, dec_guess
 
-@st.cache_data(show_spinner=False)
+@st.cache_data(show_spinner=False, ttl=60)  # TTL para refresco automático
 def read_raw_from_url(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     with urlopen(req, timeout=30) as r:
@@ -151,6 +152,11 @@ with st.sidebar:
     as_percent = st.checkbox("Valores en % (no 0–1)", value=True)
     dedup = st.selectbox("Si hay fechas duplicadas…", ["sumar", "promediar", "primera"], index=0)
     fill_gaps = st.checkbox("Rellenar días faltantes con 0", value=False)
+
+    # ---- NUEVO: botón de refresco de datos (limpia cache y rerun)
+    if st.button("🔄 Actualizar datos / recargar CSV"):
+        st.cache_data.clear()
+        st.rerun()
 
 if up is None and not url:
     st.info("Subí un CSV o pegá una URL para continuar.")
@@ -654,7 +660,7 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) =======================
-# Fórmula: Perdida % = 0,375*A2 / (1 + (0,375*A2/76,639))
+# Fórmula: Pérdida % = 0,375*A2 / (1 + (0,375*A2/76,639))
 def perdida_rinde_pct(A2):
     A2 = np.asarray(A2, dtype=float)
     return 0.375 * A2 / (1.0 + (0.375 * A2 / 76.639))
@@ -733,7 +739,8 @@ if has_factor:
     out["Plantas_m2_supresion_ctrl_quincenal_sum"] = np.nan
     if len(agg_q):
         # Ubicar índice del primer día de cada bloque y asignar la suma del bloque
-        fecha_to_idx = {pd.Timestamp(f): i for i, f in enumerate(ts_norm)}
+        ts_norm_full = pd.to_datetime(out["fecha"]).dt.normalize().to_list()
+        fecha_to_idx = {ts_norm_full[i]: i for i in range(len(ts_norm_full))}
         for _, r in agg_q.iterrows():
             idx = fecha_to_idx.get(pd.Timestamp(r["fecha_ini"]))
             if idx is not None:
@@ -814,3 +821,4 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
+
