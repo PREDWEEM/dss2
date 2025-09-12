@@ -26,6 +26,15 @@ NR_DAYS_DEFAULT = 10
 MAX_PLANTS_CAP  = 250.0  # objetivo de pico (pl·m²)
 
 # ============================== Utils ================================
+def safe_nanmax(arr, fallback=0.0):
+    try:
+        val = np.nanmax(arr)
+        if np.isfinite(val):
+            return float(val)
+        return float(fallback)
+    except ValueError:
+        return float(fallback)
+
 def sniff_sep_dec(text: str):
     sample = text[:8000]
     counts = {sep: sample.count(sep) for sep in [",", ";", "\t"]}
@@ -176,9 +185,9 @@ with st.expander("Seleccionar columnas y depurar datos", expanded=True):
 
     if df["fecha"].duplicated().any():
         if dedup == "sumar":
-            df = df.groupby("fecha,").sum(numeric_only=True).rename_axis("fecha").reset_index()
+            df = df.groupby("fecha").sum(numeric_only=True).rename_axis("fecha").reset_index()
         elif dedup == "promediar":
-            df = df.groupby("fecha,").mean(numeric_only=True).rename_axis("fecha").reset_index()
+            df = df.groupby("fecha").mean(numeric_only=True).rename_axis("fecha").reset_index()
         else:
             df = df.drop_duplicates(subset=["fecha"], keep="first")
 
@@ -247,13 +256,14 @@ if use_ciec:
     Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / Ca_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
-    Ciec = np.full_like(LAI, np.nan, dtype=float)
+    # SIN Ciec: tratamos (1 - Ciec) = 1 para que la app siga operando
+    Ciec = np.zeros_like(LAI, dtype=float)
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
 _, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 
 # ===== Supresión (base agronómica) ===================================
-emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0) if use_ciec else np.full(len(df_plot), np.nan)
+emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0)
 
 # ===== Conversión: EMERREL (cruda) → Plantas·m² (pico = 250) =========
 pico_emerrel = float(df_plot["EMERREL"].max())
@@ -399,10 +409,6 @@ if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), 
 
 # ==================== Control sobre SUPRESIÓN ==========================
 emerrel_supresion_ctrl = emerrel_supresion * ctrl_factor
-if use_ciec:
-    esperado = (df_plot["EMERREL"].values * (1.0 - Ciec)) * ctrl_factor
-    assert np.allclose(emerrel_supresion_ctrl, esperado, atol=1e-12, rtol=1e-8), \
-        "El control debe aplicarse sobre EMERREL×(1−Ciec)"
 
 plantas_supresion = (emerrel_supresion * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
 plantas_supresion_ctrl = (emerrel_supresion_ctrl * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
@@ -457,7 +463,8 @@ fig.add_trace(go.Scatter(
 ))
 
 # Bandas de manejo (pre/post)
-def _add_label(center_ts, text, bgcolor, y=0.94):
+fig_annotations_y = 0.94
+def _add_label(center_ts, text, bgcolor, y=fig_annotations_y):
     fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
         text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
         bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
@@ -491,12 +498,14 @@ if show_nonres_bands:
     if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
 
 # Ejes y escalas
-ymax = float(np.nanmax([
-    df_plot["EMERREL"].max(),
-    np.nanmax(emerrel_supresion) if np.isfinite(np.nanmax(emerrel_supresion)) else 0.0,
-    np.nanmax(emerrel_supresion_ctrl) if np.isfinite(np.nanmax(emerrel_supresion_ctrl)) else 0.0
-]))
-ymax = max(1e-6, ymax * 1.15)
+ymax = max(
+    1e-6,
+    1.15 * max(
+        safe_nanmax(df_plot["EMERREL"].values, 0.0),
+        safe_nanmax(emerrel_supresion, 0.0),
+        safe_nanmax(emerrel_supresion_ctrl, 0.0),
+    )
+)
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
@@ -511,9 +520,9 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
     plantas_emerrel_cruda = df_plot["EMERREL"].values * factor_pl
 
     candidatos = [
-        np.nanmax(plantas_supresion),
-        np.nanmax(plantas_supresion_ctrl),
-        np.nanmax(plantas_emerrel_cruda),
+        safe_nanmax(plantas_supresion, MAX_PLANTS_CAP),
+        safe_nanmax(plantas_supresion_ctrl, MAX_PLANTS_CAP),
+        safe_nanmax(plantas_emerrel_cruda, MAX_PLANTS_CAP),
         MAX_PLANTS_CAP
     ]
     plantas_max = float(np.nanmax(candidatos))
@@ -549,7 +558,7 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
     ))
 
 # Eje auxiliar y curva Ciec (opcional)
-if use_ciec:
+if use_ciec and show_ciec_curve:
     layout_kwargs["yaxis3"] = dict(
         overlaying="y", side="right", title="Ciec (0–1)", position=0.97, range=[0, 1]
     )
@@ -580,7 +589,8 @@ with st.expander("Ver checkpoints mensuales (instantáneos)", expanded=False):
             "Descargar checkpoints mensuales (CSV)",
             df_mensual_show.to_csv(index=False).encode("utf-8"),
             "checkpoints_mensuales.csv",
-            "text/csv"
+            "text/csv",
+            key="dl_checkpoints_mensuales_vista"
         )
     else:
         st.info("No hay checkpoints mensuales (revisá el rango de fechas y la siembra).")
@@ -654,26 +664,25 @@ else:
 
 with st.expander("Descargas de series", expanded=True):
     st.caption(conv_caption + f" · A2 (mensual) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m² · A2 = suma de checkpoints mensuales")
-    only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m² (supresión)", value=False)
-
     default_cols = [
         "fecha",
         "EMERREL_supresion", "EMERREL_supresion_ctrl",
         "Plantas_m2_supresion", "Plantas_m2_supresion_ctrl",
     ]
     out_show = out[default_cols].copy()
-    if len(mcols):
-        # Se muestran aparte los checkpoints mensuales en el CSV adicional
-        pass
 
     st.dataframe(out_show.tail(20), use_container_width=True)
     st.download_button("Descargar serie procesada (CSV)",
                        out_show.to_csv(index=False).encode("utf-8"),
                        "serie_procesada.csv", "text/csv")
     if len(mcols):
-        st.download_button("Descargar checkpoints mensuales (CSV)",
-                           mcols.to_csv(index=False).encode("utf-8"),
-                           "checkpoints_mensuales.csv", "text/csv")
+        st.download_button(
+            "Descargar checkpoints mensuales (CSV)",
+            mcols.to_csv(index=False).encode("utf-8"),
+            "checkpoints_mensuales.csv",
+            "text/csv",
+            key="dl_checkpoints_mensuales_descargas"
+        )
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
@@ -692,9 +701,8 @@ diag = {
     "A2_sup_ctrl_cap": A2_ctrl_final,
     # Ciec
     "LAIhc": float(LAIhc),
-    "Ciec_min_max": (float(np.nanmin(Ciec)), float(np.nanmax(Ciec))) if use_ciec else None,
+    "Ciec_min_max": (float(np.nanmin(Ciec)), float(np.nanmax(Ciec))) if len(Ciec) else None,
     "decaimiento": decaimiento_tipo,
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
-
