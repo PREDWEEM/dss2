@@ -11,6 +11,7 @@
 # - Figura principal: EMERREL (izq), Plantas·m² (derecha opcional),
 #   y eje derecho adicional (0–1) para ICIC/Ciec/EMERAC
 # - Series exportables (incluyendo versiones “control”)
+# - ***CAMBIO: reemplazado “EMERREL × Ciec” por “EMERREL × (1 − Ciec)” (supresión)***
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -21,14 +22,13 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · ICIC + Ciec + Control (NR=10d)"
+APP_TITLE = "PREDWEEM · ICIC + Ciec (supresión) + Control (NR=10d)"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional.")
+st.caption("EMERREL/ICIC/Ciec con manejo manual, eficiencias de control y decaimiento en residuales. EMERAC opcional. *Usa supresión: EMERREL × (1 − Ciec).*")
 
 # ========================== Constantes clave ==========================
-# Residualidad por defecto para NO residuales (pre selectivo NR y post graminicida)
-NR_DAYS_DEFAULT = 10
+NR_DAYS_DEFAULT = 10  # no residuales
 
 # ============================== Utils ================================
 def sniff_sep_dec(text: str):
@@ -84,11 +84,9 @@ def percentiles_from_emerrel(emerrel: pd.Series, dates: pd.Series):
         work["EMERAC_N"] = 0.0
         return {}, work, 0.0
     work["EMERAC_N"] = work["EMERAC"] / total
-
     def date_at(p):
         idx = (work["EMERAC_N"] - p).abs().idxmin()
         return pd.to_datetime(work.loc[idx, "fecha"])
-
     P = {k: date_at(k/100.0) for k in [10,25,30,40,50,60,70,80]}
     return P, work, total
 
@@ -266,7 +264,7 @@ with st.sidebar:
     show_emac_points_raw = st.checkbox("Mostrar EMERAC (puntos) cruda", value=False)
     show_emac_points_adj = st.checkbox("Mostrar EMERAC (puntos) ajustada", value=False)
     show_nonres_bands = st.checkbox("Marcar bandas NR (por defecto 10 días)", value=True)
-    show_ciec_density = st.checkbox("Mostrar EMERREL×Ciec en Plantas·m² (barras)", value=False)
+    show_sup_density = st.checkbox("Mostrar EMERREL×(1−Ciec) en Plantas·m² (barras)", value=False)
     show_icic_density = st.checkbox("Mostrar EMERREL_eff (ICIC) en Plantas·m² (barras)", value=False)
 
 if not (sow_min <= sow_date <= sow_max):
@@ -284,8 +282,13 @@ ICIC, FC, LAI = compute_icic(
     row_cm=float(row_cm), row_ref=float(row_ref),
 )
 
+# asegurar ICIC(siem.)=0 incluso si t_lag=0
+if len(ICIC):
+    ICIC[0] = 0.0
+
 if use_ciec:
-    Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / max(1e-6, float(Ca)))
+    Ca_safe = float(Ca) if float(Ca) > 0 else 1e-6
+    Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / Ca_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
     Ciec = np.full_like(ICIC, np.nan, dtype=float)
@@ -319,9 +322,9 @@ else:
     conv_caption = "No se pudo calcular Plantas·m² (pico EMERREL = 0)."
 has_factor = (factor is not None) and np.isfinite(factor)
 
-# ---- EMERREL × Ciec ----
-emerrel_x_ciec = (df_plot["EMERREL"].astype(float).values * Ciec).clip(min=0.0) if use_ciec else np.full(len(df_plot), np.nan)
-plantas_x_ciec = (emerrel_x_ciec * factor) if (has_factor and use_ciec) else np.full(len(df_plot), np.nan)
+# ---- EMERREL × (1 − Ciec) → efecto de supresión ----
+emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0) if use_ciec else np.full(len(df_plot), np.nan)
+plantas_supresion = (emerrel_supresion * factor) if (has_factor and use_ciec) else np.full(len(df_plot), np.nan)
 
 # =================== Cronograma y manejo manual =======================
 sched_rows = []
@@ -379,7 +382,7 @@ sched = pd.DataFrame(sched_rows)
 # ======================= Eficiencias de control =======================
 with st.sidebar:
     st.header("Eficiencia de control (%)")
-    st.caption("Reducción relativa aplicada a EMERREL (ef-ICIC) y EMERREL×Ciec dentro de la ventana de efecto.")
+    st.caption("Reducción relativa aplicada a EMERREL (ef-ICIC) y EMERREL×(1−Ciec) dentro de la ventana de efecto.")
     ef_pre_glifo   = st.slider("Glifosato (pre, 1 día)", 0, 100, 90, 1) if pre_glifo else 0
     ef_pre_selNR   = st.slider(f"Selectivo no residual (pre, {NR_DAYS_DEFAULT}d)", 0, 100, 60, 1) if pre_selNR else 0
     ef_pre_selR    = st.slider("Selectivo + residual (pre, 30–60d)", 0, 100, 70, 1) if pre_selR else 0
@@ -398,7 +401,7 @@ with st.sidebar:
         lam_exp = None
 
 # =================== Factor de control diario =========================
-fechas_d = df_plot["fecha"].dt.date.values  # array de date
+fechas_d = df_plot["fecha"].dt.date.values
 
 def weights_one_day(date_val):
     if not date_val:
@@ -431,13 +434,12 @@ def weights_residual(start_date, dias):
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
 
 def apply_efficiency(weights, eff_pct):
-    """Multiplica ctrl_factor por (1 - eff_pct/100 * weights) día a día (clipped a [0,1])."""
     if eff_pct <= 0:
         return
     reduc = np.clip(1.0 - (eff_pct/100.0) * weights, 0.0, 1.0)
     np.multiply(ctrl_factor, reduc, out=ctrl_factor)
 
-# Aplicar cada intervención activa (NR=10d para selectivos NO residuales)
+# Aplicar cada intervención
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
@@ -446,14 +448,14 @@ if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), 
 
 # ==================== Aplicar control a series ========================
 emerrel_eff_ctrl = df_eff["EMERREL_eff"].values * ctrl_factor
-emerrel_x_ciec_ctrl = emerrel_x_ciec * ctrl_factor  # maneja NaN si no hay Ciec
+emerrel_supresion_ctrl = emerrel_supresion * ctrl_factor  # maneja NaN si no hay Ciec
 
 if has_factor:
     plantas_eff_ctrl = plantas_eff * ctrl_factor
-    plantas_x_ciec_ctrl = plantas_x_ciec * ctrl_factor
+    plantas_supresion_ctrl = plantas_supresion * ctrl_factor
 else:
     plantas_eff_ctrl = np.full(len(df_plot), np.nan)
-    plantas_x_ciec_ctrl = np.full(len(df_plot), np.nan)
+    plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
 
 # ============================== Gráfico ===============================
 fig = go.Figure()
@@ -461,7 +463,7 @@ fig = go.Figure()
 # Customdata para tooltips (Plantas·m²)
 cd_cruda = np.column_stack([plantas_cruda])
 cd_eff   = np.column_stack([plantas_eff])
-cd_x_ciec = np.column_stack([plantas_x_ciec])
+cd_sup   = np.column_stack([plantas_supresion])
 
 fig.add_trace(go.Scatter(
     x=df_plot["fecha"], y=df_plot["EMERREL"], mode="lines",
@@ -475,22 +477,23 @@ fig.add_trace(go.Scatter(
     customdata=cd_eff,
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL (ef): %{y:.4f}<br>Plantas·m² (ef): %{customdata[0]:.1f}<extra></extra>"
 ))
-# Controladas
+# Controladas (ICIC)
 fig.add_trace(go.Scatter(
     x=df_eff["fecha"], y=emerrel_eff_ctrl, mode="lines",
     name="EMERREL (ef·ICIC·control)", line=dict(dash="solid", width=2)
 ))
 
+# Supresión por Ciec
 if use_ciec:
     fig.add_trace(go.Scatter(
-        x=df_plot["fecha"], y=emerrel_x_ciec, mode="lines",
-        name="EMERREL × Ciec", line=dict(dash="dashdot"),
-        customdata=cd_x_ciec,
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL×Ciec: %{y:.4f}<br>Plantas·m² (×Ciec): %{customdata[0]:.1f}<extra></extra>"
+        x=df_plot["fecha"], y=emerrel_supresion, mode="lines",
+        name="EMERREL × (1 − Ciec)", line=dict(dash="dashdot"),
+        customdata=cd_sup,
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL supresión: %{y:.4f}<br>Plantas·m² (sup.): %{customdata[0]:.1f}<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=df_plot["fecha"], y=emerrel_x_ciec_ctrl, mode="lines",
-        name="EMERREL × Ciec (control)", line=dict(dash="dot", width=2)
+        x=df_plot["fecha"], y=emerrel_supresion_ctrl, mode="lines",
+        name="EMERREL × (1 − Ciec) (control)", line=dict(dash="dot", width=2)
     ))
 
 # ICIC / Ciec / EMERAC → ejes derechos
@@ -557,10 +560,13 @@ if show_nonres_bands:
     if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
 
 # ======================== Ejes y escalas ==============================
-ymax = max(1e-6, float(df_plot["EMERREL"].max()) * 1.15)
+ymax_base = float(df_plot["EMERREL"].max())
+ymax_ctrl = float(np.nanmax(emerrel_eff_ctrl)) if np.isfinite(np.nanmax(emerrel_eff_ctrl)) else 0.0
+ymax = max(1e-6, (max(ymax_base, ymax_ctrl) * 1.15))
+
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title=f"EMERREL + ICIC + Ciec + Control (NR no residuales = {NR_DAYS_DEFAULT} días; residuales con decaimiento opcional)",
+    title=f"EMERREL + ICIC + supresión (1−Ciec) + Control (NR no residuales = {NR_DAYS_DEFAULT} días; residuales con decaimiento opcional)",
     xaxis_title="Fecha",
     yaxis_title="EMERREL",
     yaxis=dict(range=[0, ymax])
@@ -569,8 +575,8 @@ layout_kwargs = dict(
 if show_plants_axis and has_factor:
     plantas_max = float(np.nanmax([
         np.nanmax(plantas_cruda), np.nanmax(plantas_eff),
-        np.nanmax(plantas_x_ciec), np.nanmax(plantas_eff_ctrl),
-        np.nanmax(plantas_x_ciec_ctrl)
+        np.nanmax(plantas_supresion), np.nanmax(plantas_eff_ctrl),
+        np.nanmax(plantas_supresion_ctrl)
     ]))
     if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = 1.0
 
@@ -590,9 +596,9 @@ if show_plants_axis and has_factor:
     add_icic_emac_traces("y3", show_emac_curve_raw, show_emac_curve_adj,
                                show_emac_points_raw, show_emac_points_adj)
 
-    if use_ciec and show_ciec_density:
-        fig.add_bar(x=df_plot["fecha"], y=plantas_x_ciec, name="Plantas·m² × Ciec", yaxis="y2", opacity=0.35, legendgroup="densidad")
-        fig.add_bar(x=df_plot["fecha"], y=plantas_x_ciec_ctrl, name="Plantas·m² × Ciec (control)", yaxis="y2", opacity=0.35, legendgroup="densidad")
+    if use_ciec and show_sup_density:
+        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion, name="Plantas·m² × (1−Ciec)", yaxis="y2", opacity=0.35, legendgroup="densidad")
+        fig.add_bar(x=df_plot["fecha"], y=plantas_supresion_ctrl, name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", opacity=0.35, legendgroup="densidad")
     if show_icic_density:
         fig.add_bar(x=df_eff["fecha"], y=plantas_eff,      name="Plantas·m² (ef · ICIC)",          yaxis="y2", opacity=0.35, legendgroup="densidad")
         fig.add_bar(x=df_eff["fecha"], y=plantas_eff_ctrl, name="Plantas·m² (ef · ICIC · control)", yaxis="y2", opacity=0.35, legendgroup="densidad")
@@ -617,31 +623,31 @@ else:
 # =========================== Descargas de series ======================
 out = df_plot.copy()
 out["EMERREL_eff"] = df_eff["EMERREL_eff"]
-out["EMERREL_x_Ciec"] = emerrel_x_ciec
+out["EMERREL_supresion"] = emerrel_supresion
 out["EMERREL_eff_ctrl"] = np.round(emerrel_eff_ctrl, 6)
-out["EMERREL_x_Ciec_ctrl"] = np.round(emerrel_x_ciec_ctrl, 6)
+out["EMERREL_supresion_ctrl"] = np.round(emerrel_supresion_ctrl, 6)
 
 if has_factor:
-    out["Plantas_m2_est_cruda"]       = np.round(plantas_cruda, 1)
-    out["Plantas_m2_est_ef"]          = np.round(plantas_eff, 1)
-    out["Plantas_m2_est_xCiec"]       = np.round(plantas_x_ciec, 1)
-    out["Plantas_m2_est_ef_ctrl"]     = np.round(plantas_eff_ctrl, 1)
-    out["Plantas_m2_est_xCiec_ctrl"]  = np.round(plantas_x_ciec_ctrl, 1)
+    out["Plantas_m2_est_cruda"]            = np.round(plantas_cruda, 1)
+    out["Plantas_m2_est_ef"]               = np.round(plantas_eff, 1)
+    out["Plantas_m2_est_supresion"]        = np.round(plantas_supresion, 1)
+    out["Plantas_m2_est_ef_ctrl"]          = np.round(plantas_eff_ctrl, 1)
+    out["Plantas_m2_est_supresion_ctrl"]   = np.round(plantas_supresion_ctrl, 1)
 else:
     out["Plantas_m2_est_cruda"] = np.nan
     out["Plantas_m2_est_ef"]    = np.nan
-    out["Plantas_m2_est_xCiec"] = np.nan
-    out["Plantas_m2_est_ef_ctrl"]    = np.nan
-    out["Plantas_m2_est_xCiec_ctrl"] = np.nan
+    out["Plantas_m2_est_supresion"] = np.nan
+    out["Plantas_m2_est_ef_ctrl"] = np.nan
+    out["Plantas_m2_est_supresion_ctrl"] = np.nan
 
 with st.expander("Descargas de series", expanded=True):
     st.caption(conv_caption)
     only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m²", value=False)
 
-    default_cols = ["fecha", "EMERREL", "EMERREL_eff", "EMERREL_x_Ciec",
-                    "EMERREL_eff_ctrl", "EMERREL_x_Ciec_ctrl",
-                    "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_xCiec",
-                    "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_xCiec_ctrl"]
+    default_cols = ["fecha", "EMERREL", "EMERREL_eff", "EMERREL_supresion",
+                    "EMERREL_eff_ctrl", "EMERREL_supresion_ctrl",
+                    "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_supresion",
+                    "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_supresion_ctrl"]
     available_cols = [c for c in default_cols if c in out.columns] + [c for c in out.columns if c not in default_cols]
     preselect = [c for c in available_cols if c.startswith("Plantas_m2")] if only_plants else [c for c in available_cols if c in default_cols]
     selected_cols = st.multiselect("Columnas a incluir en la tabla y el CSV:", available_cols, default=preselect)
@@ -663,8 +669,8 @@ diag = {
     "suma_EMERREL": float(df_plot["EMERREL"].sum()),
     "suma_EMERREL_ef": float(df_eff["EMERREL_eff"].sum()),
     "suma_EMERREL_ef_ctrl": float(np.nansum(emerrel_eff_ctrl)),
-    "suma_EMERREL_x_Ciec": float(np.nansum(emerrel_x_ciec)),
-    "suma_EMERREL_x_Ciec_ctrl": float(np.nansum(emerrel_x_ciec_ctrl)),
+    "suma_EMERREL_supresion": float(np.nansum(emerrel_supresion)),
+    "suma_EMERREL_supresion_ctrl": float(np.nansum(emerrel_supresion_ctrl)),
     "tot_base": float(tot_base),
     "tot_ajustada": float(tot_star),
     "pico_EMERREL": float(df_plot["EMERREL"].max()),
