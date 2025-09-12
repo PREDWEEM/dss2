@@ -2,8 +2,8 @@
 # app.py — PREDWEEM · ICIC + supresión (1−Ciec) + Control (NR=10d por defecto)
 # - EMERREL × (1 − Ciec) (supresión) + versiones con control post
 # - Conversión EMERREL→plantas·m² con tope máx 250 pl·m²
-# - Totales de escapes diarios y quincenales (raw y con tope)
-# - Series exportables (acumuladas y quincenales) + diagnóstico extendido
+# - Totales de escapes SOLO QUINCENALES (con tope)
+# - Series exportables (solo quincenales para escapes) + diagnóstico
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -291,14 +291,14 @@ if t_star is not None:
 else:
     df_eff["EMERREL_eff"] = df_eff["EMERREL"]
 
-# Percentiles y acumuladas
-P_base, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
-P_star, work_star, tot_star = percentiles_from_emerrel(df_eff["EMERREL_eff"], df_eff["fecha"])
+# Percentiles y acumuladas (solo para información visual)
+_, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
+_, work_star, tot_star = percentiles_from_emerrel(df_eff["EMERREL_eff"], df_eff["fecha"])
 
 # ===== Conversión EMERREL → Plantas·m² (pico ≙ 250) =====
 pico = float(df_plot["EMERREL"].max())
 if pico > 0:
-    factor = MAX_PLANTS_CAP / pico  # antes 350 / pico
+    factor = MAX_PLANTS_CAP / pico
     plantas_cruda = (df_plot["EMERREL"] * factor).values
     plantas_eff   = (df_eff["EMERREL_eff"] * factor).values
     conv_caption = (f"Conversión: pico EMERREL={pico:.4f} → {MAX_PLANTS_CAP:.0f} pl·m² "
@@ -364,7 +364,7 @@ if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Bar
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
 if post_gram: add_sched(f"Post · graminicida selectivo (NR)", post_gram_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
-if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias} días")
+if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias}d")
 sched = pd.DataFrame(sched_rows)
 
 # ======================= Eficiencias de control =======================
@@ -445,24 +445,18 @@ else:
     plantas_eff_ctrl = np.full(len(df_plot), np.nan)
     plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
 
-# ======= Totales de escapes (plantas·m²) — SUMA DIARIA =======
-N_escape_sup_raw = float(np.nansum(plantas_supresion)) if has_factor else float("nan")
-N_escape_sup_ctrl_raw = float(np.nansum(plantas_supresion_ctrl)) if has_factor else float("nan")
-# Tope 250
-N_escape_sup = min(MAX_PLANTS_CAP, N_escape_sup_raw) if np.isfinite(N_escape_sup_raw) else float("nan")
-N_escape_sup_ctrl = min(MAX_PLANTS_CAP, N_escape_sup_ctrl_raw) if np.isfinite(N_escape_sup_ctrl_raw) else float("nan")
-
 # ======= Sumatoria QUINCENAL (cada 15 días desde la siembra) =======
-# (1) Normalizar timestamps y restar contra sow_date para obtener días enteros
+# Normalizar timestamps y restar contra sow_date para obtener días enteros
 ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
 days_since = (ts_norm - pd.Timestamp(sow_date)).dt.days
 mask_quince = (days_since >= 0) & (days_since % 15 == 0)
-# (2) Convertir la máscara a NumPy al indexar arrays NumPy
 mask_q = mask_quince.to_numpy()
 
+# Totales quincenales (solo entradas en días múltiplos de 15)
 N_escape_sup_raw_quincenal = float(np.nansum(plantas_supresion[mask_q])) if has_factor else float("nan")
 N_escape_sup_ctrl_raw_quincenal = float(np.nansum(plantas_supresion_ctrl[mask_q])) if has_factor else float("nan")
 
+# Aplicar tope máximo posible (cap a 250)
 N_escape_sup_quincenal = min(MAX_PLANTS_CAP, N_escape_sup_raw_quincenal) if np.isfinite(N_escape_sup_raw_quincenal) else float("nan")
 N_escape_sup_ctrl_quincenal = min(MAX_PLANTS_CAP, N_escape_sup_ctrl_raw_quincenal) if np.isfinite(N_escape_sup_ctrl_raw_quincenal) else float("nan")
 
@@ -622,15 +616,12 @@ fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
 st.caption(f"{conv_caption} · No residuales con NR por defecto = {NR_DAYS_DEFAULT} días. · Tope máx = {MAX_PLANTS_CAP:.0f} pl·m².")
 
-# ======================= Totales visibles en UI =======================
-st.subheader("Plantas·m² que escapan (Suma diaria vs. quincenal)")
+# ======================= Totales visibles en UI (SOLO QUINCENAL) =====
+st.subheader("Plantas·m² que escapan — Sumatoria QUINCENAL (con tope)")
 st.markdown(
     f"""
-**Diaria — Solo supresión (1−Ciec):** **{N_escape_sup:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_ • sin tope: {N_escape_sup_raw:,.1f}  
-**Diaria — Supresión + control post:** **{N_escape_sup_ctrl:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_ • sin tope: {N_escape_sup_ctrl_raw:,.1f}
-
-**Quincenal — Solo supresión (1−Ciec):** **{N_escape_sup_quincenal:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_ • sin tope: {N_escape_sup_raw_quincenal:,.1f}  
-**Quincenal — Supresión + control post:** **{N_escape_sup_ctrl_quincenal:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_ • sin tope: {N_escape_sup_ctrl_raw_quincenal:,.1f}
+**Quincenal — Solo supresión (1−Ciec):** **{N_escape_sup_quincenal:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
+**Quincenal — Supresión + control post:** **{N_escape_sup_ctrl_quincenal:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
 
@@ -656,33 +647,30 @@ if has_factor:
     out["Plantas_m2_est_supresion"]        = np.round(plantas_supresion, 1)
     out["Plantas_m2_est_ef_ctrl"]          = np.round(plantas_eff_ctrl, 1)
     out["Plantas_m2_est_supresion_ctrl"]   = np.round(plantas_supresion_ctrl, 1)
-    # acumuladas DIARIAS sin tope
-    out["Plantas_m2_supresion_acum"]       = np.round(np.nancumsum(plantas_supresion), 1)
-    out["Plantas_m2_supresion_ctrl_acum"]  = np.round(np.nancumsum(plantas_supresion_ctrl), 1)
-    # acumuladas DIARIAS con tope 250
-    out["Plantas_m2_supresion_acum_cap"]      = np.round(np.minimum(out["Plantas_m2_supresion_acum"].values, MAX_PLANTS_CAP), 1)
-    out["Plantas_m2_supresion_ctrl_acum_cap"] = np.round(np.minimum(out["Plantas_m2_supresion_ctrl_acum"].values, MAX_PLANTS_CAP), 1)
+
     # Series QUINCENALES (solo en días múltiplos de 15 desde siembra; NaN resto)
     sup_q = np.where(mask_q, plantas_supresion, np.nan)
     sup_ctrl_q = np.where(mask_q, plantas_supresion_ctrl, np.nan)
     out["Plantas_m2_supresion_quincenal"] = np.round(sup_q, 1)
     out["Plantas_m2_supresion_ctrl_quincenal"] = np.round(sup_ctrl_q, 1)
-    # Acumuladas QUINCENALES sin tope
+
+    # Acumuladas QUINCENALES sin tope (para ver progresión intermedia)
     out["Plantas_m2_supresion_quincenal_acum"] = np.round(np.nancumsum(np.nan_to_num(sup_q, nan=0.0)), 1)
     out["Plantas_m2_supresion_ctrl_quincenal_acum"] = np.round(np.nancumsum(np.nan_to_num(sup_ctrl_q, nan=0.0)), 1)
+
     # Acumuladas QUINCENALES con tope 250
-    out["Plantas_m2_supresion_quincenal_acum_cap"] = np.round(np.minimum(out["Plantas_m2_supresion_quincenal_acum"].values, MAX_PLANTS_CAP), 1)
-    out["Plantas_m2_supresion_ctrl_quincenal_acum_cap"] = np.round(np.minimum(out["Plantas_m2_supresion_ctrl_quincenal_acum"].values, MAX_PLANTS_CAP), 1)
+    out["Plantas_m2_supresion_quincenal_acum_cap"] = np.round(
+        np.minimum(out["Plantas_m2_supresion_quincenal_acum"].values, MAX_PLANTS_CAP), 1
+    )
+    out["Plantas_m2_supresion_ctrl_quincenal_acum_cap"] = np.round(
+        np.minimum(out["Plantas_m2_supresion_ctrl_quincenal_acum"].values, MAX_PLANTS_CAP), 1
+    )
 else:
     out["Plantas_m2_est_cruda"] = np.nan
     out["Plantas_m2_est_ef"]    = np.nan
     out["Plantas_m2_est_supresion"] = np.nan
     out["Plantas_m2_est_ef_ctrl"] = np.nan
     out["Plantas_m2_est_supresion_ctrl"] = np.nan
-    out["Plantas_m2_supresion_acum"] = np.nan
-    out["Plantas_m2_supresion_ctrl_acum"] = np.nan
-    out["Plantas_m2_supresion_acum_cap"] = np.nan
-    out["Plantas_m2_supresion_ctrl_acum_cap"] = np.nan
     out["Plantas_m2_supresion_quincenal"] = np.nan
     out["Plantas_m2_supresion_ctrl_quincenal"] = np.nan
     out["Plantas_m2_supresion_quincenal_acum"] = np.nan
@@ -691,7 +679,7 @@ else:
     out["Plantas_m2_supresion_ctrl_quincenal_acum_cap"] = np.nan
 
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + f" · Tope máx = {MAX_PLANTS_CAP:.0f} pl·m²")
+    st.caption(conv_caption + f" · Tope máx = {MAX_PLANTS_CAP:.0f} pl·m² · Totales: SOLO quincenales")
     only_plants = st.checkbox("Mostrar/descargar sólo columnas de Plantas·m²", value=False)
 
     default_cols = [
@@ -700,9 +688,7 @@ with st.expander("Descargas de series", expanded=True):
         "EMERREL_eff_ctrl", "EMERREL_supresion_ctrl",
         "Plantas_m2_est_cruda", "Plantas_m2_est_ef", "Plantas_m2_est_supresion",
         "Plantas_m2_est_ef_ctrl", "Plantas_m2_est_supresion_ctrl",
-        "Plantas_m2_supresion_acum", "Plantas_m2_supresion_ctrl_acum",
-        "Plantas_m2_supresion_acum_cap", "Plantas_m2_supresion_ctrl_acum_cap",
-        # Quincenales:
+        # SOLO quincenales:
         "Plantas_m2_supresion_quincenal", "Plantas_m2_supresion_ctrl_quincenal",
         "Plantas_m2_supresion_quincenal_acum", "Plantas_m2_supresion_ctrl_quincenal_acum",
         "Plantas_m2_supresion_quincenal_acum_cap", "Plantas_m2_supresion_ctrl_quincenal_acum_cap"
@@ -730,12 +716,7 @@ diag = {
     "suma_EMERREL_ef_ctrl": float(np.nansum(emerrel_eff_ctrl)),
     "suma_EMERREL_supresion": float(np.nansum(emerrel_supresion)),
     "suma_EMERREL_supresion_ctrl": float(np.nansum(emerrel_supresion_ctrl)),
-    # Totales diarios
-    "N_escape_sup_pl_m2_raw": N_escape_sup_raw,
-    "N_escape_sup_y_control_pl_m2_raw": N_escape_sup_ctrl_raw,
-    "N_escape_sup_pl_m2_cap": N_escape_sup,
-    "N_escape_sup_y_control_pl_m2_cap": N_escape_sup_ctrl,
-    # Totales quincenales
+    # Totales SOLO quincenales
     "N_escape_sup_quincenal_pl_m2_raw": N_escape_sup_raw_quincenal,
     "N_escape_sup_y_control_quincenal_pl_m2_raw": N_escape_sup_ctrl_raw_quincenal,
     "N_escape_sup_quincenal_pl_m2_cap": N_escape_sup_quincenal,
@@ -751,4 +732,3 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
-
