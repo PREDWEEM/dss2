@@ -2,10 +2,10 @@
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI), con curva opcional
-# - Conversión a Plantas·m² anclada al pico de EMERREL (cruda) → 250 pl·m²
-# - A2 = SUMA de valores INSTANTÁNEOS MENSUALES (1 por mes calendario desde siembra), con TOPE 250
-# - Pérdida de rinde calculada con A2 topeado
-# - Eje derecho: incluye "EMERREL→Plantas·m² (cruda)" y escala que siempre contiene 250
+# - Equivalencia POR ÁREA: AUC[EMERREL (cruda)] ≙ 250 pl·m² (competencia máxima)
+# - A2 = 250 * ( AUC[supresión] / AUC[cruda] )   y   A2_ctrl = 250 * ( AUC[supresión×control] / AUC[cruda] )
+# - Pérdida de rinde calculada con A2 (cap 250)
+# - Nuevo: curva de A2 acumulado (integral corrida) vs tiempo (supresión y supresión+control)
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -16,14 +16,14 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC)"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("Plantas·m², checkpoints mensuales y pérdida de rinde se basan en EMERREL × (1 − Ciec) (y su versión con control). No se calcula ICIC.")
+st.caption("Escala por área: AUC de EMERREL (cruda) ≙ 250 pl·m². A2, pérdida de rinde y A2 acumulado usan esa escala. No se calcula ICIC.")
 
 # ========================== Constantes clave ==========================
 NR_DAYS_DEFAULT = 10
-MAX_PLANTS_CAP  = 250.0  # objetivo de pico (pl·m²)
+MAX_PLANTS_CAP  = 250.0  # pl·m² (competencia máxima)
 
 # ============================== Utils ================================
 def safe_nanmax(arr, fallback=0.0):
@@ -93,6 +93,44 @@ def percentiles_from_emerrel(emerrel: pd.Series, dates: pd.Series):
         return pd.to_datetime(work.loc[idx, "fecha"])
     P = {k: date_at(k/100.0) for k in [10,25,30,40,50,60,70,80]}
     return P, work, total
+
+def _to_days(ts: pd.Series) -> np.ndarray:
+    """Convierte timestamps a días (float) desde el primer punto."""
+    t = pd.to_datetime(ts).astype("int64") / 1e9  # segundos
+    t = (t - t.iloc[0]) / 86400.0  # días
+    return t.to_numpy(dtype=float)
+
+def auc_time(fecha: pd.Series, y: np.ndarray, mask=None) -> float:
+    """AUC por regla trapezoidal usando fechas reales (espaciado irregular)."""
+    if mask is not None:
+        fecha = fecha[mask]
+        y = y[mask]
+    if len(fecha) < 2:
+        return 0.0
+    tdays = _to_days(pd.to_datetime(fecha))
+    y = np.asarray(y, dtype=float)
+    y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
+    try:
+        return float(np.trapz(y, tdays))
+    except Exception:
+        return 0.0
+
+def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Series:
+    """Integral corrida (trapezoidal) desde el primer punto válido; respeta huecos y espaciado."""
+    f = pd.to_datetime(fecha)
+    y_arr = np.asarray(y, dtype=float)
+    if mask is not None:
+        f = f[mask]
+        y_arr = y_arr[mask]
+    if len(f) == 0:
+        return pd.Series(dtype=float)
+    t = _to_days(f)
+    y_arr = np.nan_to_num(y_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    out = np.zeros_like(y_arr, dtype=float)
+    for i in range(1, len(y_arr)):
+        dt_i = max(0.0, t[i] - t[i-1])
+        out[i] = out[i-1] + 0.5 * (y_arr[i-1] + y_arr[i]) * dt_i
+    return pd.Series(out, index=f)
 
 # ======================= Canopia (sin ICIC): FC y LAI =================
 def compute_canopy(
@@ -256,7 +294,6 @@ if use_ciec:
     Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / Ca_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
-    # SIN Ciec: tratamos (1 - Ciec) = 1 para que la app siga operando
     Ciec = np.zeros_like(LAI, dtype=float)
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
@@ -265,28 +302,22 @@ _, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["f
 # ===== Supresión (base agronómica) ===================================
 emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0)
 
-# ===== Conversión: EMERREL (cruda) → Plantas·m² (pico = 250) =========
-pico_emerrel = float(df_plot["EMERREL"].max())
-if pico_emerrel > 0:
-    factor_pl = MAX_PLANTS_CAP / pico_emerrel   # anclado a EMERREL cruda
+# ================== AUC y factor de equivalencia por ÁREA =============
+ts = pd.to_datetime(df_plot["fecha"])
+mask_after_sow = ts.dt.date >= sow_date
+
+auc_cruda = auc_time(ts, df_plot["EMERREL"].to_numpy(dtype=float), mask=mask_after_sow)  # (EMERREL)·día
+auc_sup   = auc_time(ts, emerrel_supresion, mask=mask_after_sow)
+
+if auc_cruda > 0:
+    factor_area_to_plants = MAX_PLANTS_CAP / auc_cruda  # [pl·m²] por (EMERREL·día)
     conv_caption = (
-        f"Conversión: pico EMERREL(cruda)={pico_emerrel:.4f} → {MAX_PLANTS_CAP:.0f} pl·m² "
-        f"⇒ factor={factor_pl:.2f} pl·m² por unidad EMERREL"
+        f"Equivalencia por ÁREA: AUC(EMERREL cruda desde siembra) = {auc_cruda:.4f} → "
+        f"{MAX_PLANTS_CAP:.0f} pl·m² ⇒ factor={factor_area_to_plants:.4f} pl·m² por (EMERREL·día)"
     )
 else:
-    factor_pl = None
-    conv_caption = "No se pudo calcular Plantas·m² (pico de EMERREL cruda = 0)."
-
-# Chequeo visual y diagnóstico del mapeo a 250
-if factor_pl is not None and np.isfinite(factor_pl) and np.isfinite(pico_emerrel):
-    mapped_max = pico_emerrel * factor_pl
-    st.success(f"Chequeo conversión: pico EMERREL × factor = {mapped_max:.2f} pl·m² (objetivo: {MAX_PLANTS_CAP:.0f}).")
-else:
-    mapped_max = float("nan")
-    st.warning("No fue posible verificar el mapeo del pico (factor o pico no finitos).")
-
-# Densidades resultantes (supresión y supresión+control) en plantas·m²
-plantas_supresion = (emerrel_supresion * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
+    factor_area_to_plants = None
+    conv_caption = "No se pudo escalar por área (AUC de EMERREL cruda = 0)."
 
 # =================== Manejo (control) y decaimientos ===================
 sched_rows = []
@@ -297,8 +328,8 @@ def add_sched(nombre, fecha_ini, dias_res=None, nota=""):
 
 with st.sidebar:
     st.header("Manejo pre-siembra (manual)")
-    min_date = df_plot["fecha"].min().date()
-    max_date = df_plot["fecha"].max().date()
+    min_date = ts.min().date()
+    max_date = ts.max().date()
     pre_glifo = st.checkbox("Herbicida total (glifosato)", value=False)
     pre_glifo_date = st.date_input("Fecha glifosato (pre)", value=min_date, min_value=min_date, max_value=max_date, disabled=not pre_glifo)
 
@@ -363,7 +394,7 @@ with st.sidebar:
         lam_exp = None
 
 # =================== Factor de control diario =========================
-fechas_d = df_plot["fecha"].dt.date.values
+fechas_d = ts.dt.date.values
 
 def weights_one_day(date_val):
     if not date_val:
@@ -410,56 +441,73 @@ if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), 
 # ==================== Control sobre SUPRESIÓN ==========================
 emerrel_supresion_ctrl = emerrel_supresion * ctrl_factor
 
-plantas_supresion = (emerrel_supresion * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
-plantas_supresion_ctrl = (emerrel_supresion_ctrl * factor_pl) if (factor_pl is not None and np.isfinite(factor_pl)) else np.full(len(df_plot), np.nan)
+# ========================= A2 por AUC (área) ===========================
+auc_sup_ctrl = auc_time(ts, emerrel_supresion_ctrl, mask=mask_after_sow)
 
-# ======= MENSUALES: SUMA de valores instantáneos (1 por mes) ==========
-ts_norm = pd.to_datetime(df_plot["fecha"]).dt.normalize()
-mask_after_sow = ts_norm.dt.date >= sow_date
-
-df_m = pd.DataFrame({
-    "fecha": ts_norm,
-    "Plantas_m2_supresion": plantas_supresion,
-    "Plantas_m2_supresion_ctrl": plantas_supresion_ctrl
-})
-df_m = df_m.loc[mask_after_sow].copy()
-if len(df_m):
-    df_m["ym"] = df_m["fecha"].dt.to_period("M")
-    idx_first_of_month = df_m.groupby("ym")["fecha"].idxmin()
-    df_mensual = df_m.loc[idx_first_of_month].sort_values("fecha").reset_index(drop=True)
+if factor_area_to_plants is not None:
+    A2_sup_raw  = MAX_PLANTS_CAP * (auc_sup   / auc_cruda) if auc_cruda > 0 else float("nan")
+    A2_ctrl_raw = MAX_PLANTS_CAP * (auc_sup_ctrl / auc_cruda) if auc_cruda > 0 else float("nan")
 else:
-    df_mensual = df_m.copy()
-
-A2_sup_raw  = float(np.nansum(df_mensual["Plantas_m2_supresion"])) if "Plantas_m2_supresion" in df_mensual else float("nan")
-A2_ctrl_raw = float(np.nansum(df_mensual["Plantas_m2_supresion_ctrl"])) if "Plantas_m2_supresion_ctrl" in df_mensual else float("nan")
+    A2_sup_raw, A2_ctrl_raw = float("nan"), float("nan")
 
 A2_sup_final  = min(MAX_PLANTS_CAP, A2_sup_raw)  if np.isfinite(A2_sup_raw)  else float("nan")
 A2_ctrl_final = min(MAX_PLANTS_CAP, A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else float("nan")
+
+# =========== Series instantáneas en plantas·m²·día⁻¹ (escala por área)
+if factor_area_to_plants is not None:
+    plantas_emerrel_cruda      = df_plot["EMERREL"].values * factor_area_to_plants
+    plantas_supresion          = emerrel_supresion * factor_area_to_plants
+    plantas_supresion_ctrl     = emerrel_supresion_ctrl * factor_area_to_plants
+else:
+    plantas_emerrel_cruda  = np.full(len(df_plot), np.nan)
+    plantas_supresion      = np.full(len(df_plot), np.nan)
+    plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
+
+# =========== Curvas A2 acumulado (integral corrida desde siembra) =====
+if factor_area_to_plants is not None:
+    # series recortadas a ≥ siembra
+    ts_sow = ts[mask_after_sow]
+    sup_sow = emerrel_supresion[mask_after_sow]
+    sup_ctrl_sow = emerrel_supresion_ctrl[mask_after_sow]
+
+    auc_cum_sup = cumulative_auc_series(ts, emerrel_supresion, mask=mask_after_sow)          # (EMERREL·día) acumulado
+    auc_cum_ctrl = cumulative_auc_series(ts, emerrel_supresion_ctrl, mask=mask_after_sow)
+
+    A2_cum_sup = auc_cum_sup * factor_area_to_plants                                        # pl·m² acumulado
+    A2_cum_ctrl = auc_cum_ctrl * factor_area_to_plants
+
+    # cap a 250
+    A2_cum_sup_cap = A2_cum_sup.clip(upper=MAX_PLANTS_CAP)
+    A2_cum_ctrl_cap = A2_cum_ctrl.clip(upper=MAX_PLANTS_CAP)
+else:
+    ts_sow = pd.to_datetime([])
+    A2_cum_sup_cap = pd.Series(dtype=float)
+    A2_cum_ctrl_cap = pd.Series(dtype=float)
 
 # ============================== Gráfico 1 ==============================
 fig = go.Figure()
 
 # EMERREL cruda (informativa)
 fig.add_trace(go.Scatter(
-    x=df_plot["fecha"], y=df_plot["EMERREL"], mode="lines",
+    x=ts, y=df_plot["EMERREL"], mode="lines",
     name="EMERREL (cruda)",
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL: %{y:.4f}<extra></extra>"
 ))
 
 # Supresión base
 fig.add_trace(go.Scatter(
-    x=df_plot["fecha"], y=emerrel_supresion, mode="lines",
+    x=ts, y=emerrel_supresion, mode="lines",
     name="EMERREL × (1 − Ciec)", line=dict(dash="dashdot"),
     customdata=np.column_stack([plantas_supresion]),
-    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión: %{y:.4f}<br>Plantas·m² (sup.): %{customdata[0]:.1f}<extra></extra>"
+    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión: %{y:.4f}<br>pl·m²·día⁻¹ (sup.): %{customdata[0]:.2f}<extra></extra>"
 ))
 
 # Supresión + control
 fig.add_trace(go.Scatter(
-    x=df_plot["fecha"], y=emerrel_supresion_ctrl, mode="lines",
+    x=ts, y=emerrel_supresion_ctrl, mode="lines",
     name="EMERREL × (1 − Ciec) (control)", line=dict(dash="dot", width=2),
     customdata=np.column_stack([plantas_supresion_ctrl]),
-    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión (ctrl): %{y:.4f}<br>Plantas·m² (sup. ctrl): %{customdata[0]:.1f}<extra></extra>"
+    hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión (ctrl): %{y:.4f}<br>pl·m²·día⁻¹ (sup. ctrl): %{customdata[0]:.2f}<extra></extra>"
 ))
 
 # Bandas de manejo (pre/post)
@@ -515,10 +563,8 @@ layout_kwargs = dict(
     yaxis=dict(range=[0, ymax])
 )
 
-# ========= Eje derecho opcional: Plantas·m² (incluye 250 siempre) ========
-if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
-    plantas_emerrel_cruda = df_plot["EMERREL"].values * factor_pl
-
+# ========= Eje derecho opcional: Plantas·m²·día⁻¹ (escala por área) ========
+if show_plants_axis and (factor_area_to_plants is not None) and np.isfinite(factor_area_to_plants):
     candidatos = [
         safe_nanmax(plantas_supresion, MAX_PLANTS_CAP),
         safe_nanmax(plantas_supresion_ctrl, MAX_PLANTS_CAP),
@@ -532,7 +578,7 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
-        title="Plantas·m²",
+        title="Plantas·m²·día⁻¹ (escala por AUC)",
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
@@ -540,21 +586,21 @@ if show_plants_axis and (factor_pl is not None) and np.isfinite(factor_pl):
     )
 
     fig.add_trace(go.Scatter(
-        x=df_plot["fecha"], y=plantas_emerrel_cruda,
-        name="EMERREL→Plantas·m² (cruda)",
+        x=ts, y=plantas_emerrel_cruda,
+        name="EMERREL→pl·m²·día⁻¹ (cruda)",
         yaxis="y2", mode="lines", line=dict(width=1),
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL→Plantas·m²: %{y:.1f}<extra></extra>"
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>pl·m²·día⁻¹ (cruda): %{y:.2f}<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=df_plot["fecha"], y=plantas_supresion,
-        name="Plantas·m² × (1−Ciec)", yaxis="y2", mode="lines",
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup.): %{y:.1f}<extra></extra>"
+        x=ts, y=plantas_supresion,
+        name="pl·m²·día⁻¹ × (1−Ciec)", yaxis="y2", mode="lines",
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>pl·m²·día⁻¹ (sup.): %{y:.2f}<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=df_plot["fecha"], y=plantas_supresion_ctrl,
-        name="Plantas·m² × (1−Ciec) (control)", yaxis="y2", mode="lines",
+        x=ts, y=plantas_supresion_ctrl,
+        name="pl·m²·día⁻¹ × (1−Ciec) (ctrl)", yaxis="y2", mode="lines",
         line=dict(dash="dot"),
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Plantas·m² (sup. ctrl): %{y:.1f}<extra></extra>"
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>pl·m²·día⁻¹ (sup. ctrl): %{y:.2f}<extra></extra>"
     ))
 
 # Eje auxiliar y curva Ciec (opcional)
@@ -569,31 +615,16 @@ if use_ciec and show_ciec_curve:
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
-st.caption(f"{conv_caption} · NR por defecto = {NR_DAYS_DEFAULT} días · A2 (mensual) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m² (sumatoria de checkpoints mensuales).")
+st.caption(conv_caption + f" · A2 (por AUC) con tope = {MAX_PLANTS_CAP:.0f} pl·m².")
 
-# ======================= A2 en UI (SUMA MENSUAL con tope) =============
-st.subheader("Plantas·m² que escapan — Sumatoria MENSUAL (con tope)")
+# ======================= A2 en UI (AUC con tope) ======================
+st.subheader("Plantas·m² que escapan — Área bajo la curva (AUC) con tope")
 st.markdown(
     f"""
-**Sumatoria — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
-**Sumatoria — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
+**A2 — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
+**A2 — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
-
-with st.expander("Ver checkpoints mensuales (instantáneos)", expanded=False):
-    if len(df_mensual):
-        df_mensual_show = df_mensual[["fecha","Plantas_m2_supresion","Plantas_m2_supresion_ctrl"]].copy()
-        df_mensual_show["fecha"] = pd.to_datetime(df_mensual_show["fecha"]).dt.date
-        st.dataframe(df_mensual_show, use_container_width=True)
-        st.download_button(
-            "Descargar checkpoints mensuales (CSV)",
-            df_mensual_show.to_csv(index=False).encode("utf-8"),
-            "checkpoints_mensuales.csv",
-            "text/csv",
-            key="dl_checkpoints_mensuales_vista"
-        )
-    else:
-        st.info("No hay checkpoints mensuales (revisá el rango de fechas y la siembra).")
 
 # ======================= Pérdida de rendimiento (%) ===================
 def perdida_rinde_pct(A2):
@@ -611,7 +642,43 @@ st.markdown(
 """
 )
 
-# =================== Gráfico 2: Pérdida (%) vs A2 (pl·m²) =============
+# ============== Gráfico 2: A2 acumulado (integral corrida) =============
+st.subheader("A2 acumulado (pl·m²) desde siembra")
+fig_a2 = go.Figure()
+if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
+    fig_a2.add_trace(go.Scatter(
+        x=A2_cum_sup_cap.index, y=A2_cum_sup_cap.values, mode="lines",
+        name="A2 acum — Supresión",
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (sup): %{y:.1f} pl·m²<extra></extra>"
+    ))
+    fig_a2.add_trace(go.Scatter(
+        x=A2_cum_ctrl_cap.index, y=A2_cum_ctrl_cap.values, mode="lines",
+        name="A2 acum — Supresión + control",
+        line=dict(dash="dot"),
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (ctrl): %{y:.1f} pl·m²<extra></extra>"
+    ))
+    # Línea tope 250
+    fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash", annotation_text="Tope 250", annotation_position="top left")
+
+    # Marcadores en el último punto
+    fig_a2.add_trace(go.Scatter(
+        x=[A2_cum_sup_cap.index[-1]], y=[A2_cum_sup_cap.values[-1]], mode="markers+text",
+        name="Final supresión", text=[f"{A2_cum_sup_cap.values[-1]:.1f}"], textposition="top center"
+    ))
+    fig_a2.add_trace(go.Scatter(
+        x=[A2_cum_ctrl_cap.index[-1]], y=[A2_cum_ctrl_cap.values[-1]], mode="markers+text",
+        name="Final supresión+control", text=[f"{A2_cum_ctrl_cap.values[-1]:.1f}"], textposition="bottom center"
+    ))
+
+fig_a2.update_layout(
+    title="A2 acumulado (pl·m²) por integración temporal (cap 250)",
+    xaxis_title="Fecha",
+    yaxis_title="A2 acumulado (pl·m²)",
+    margin=dict(l=10, r=10, t=40, b=10)
+)
+st.plotly_chart(fig_a2, use_container_width=True)
+
+# ============== Gráfico 3: Pérdida (%) vs A2 (pl·m²) ==================
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
 
@@ -632,8 +699,8 @@ if np.isfinite(A2_ctrl_final):
     ))
 
 fig_loss.update_layout(
-    title="Pérdida de rendimiento (%) vs. A2 (pl·m²)",
-    xaxis_title="A2 (pl·m²) — sumatoria mensual (tope 250)",
+    title="Pérdida de rendimiento (%) vs. A2 (pl·m²) — escala por AUC",
+    xaxis_title="A2 (pl·m²) — área bajo la curva (tope 250)",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
 )
@@ -644,64 +711,69 @@ st.subheader("Cronograma de manejo (manual)")
 if len(sched):
     st.dataframe(sched, use_container_width=True)
     st.download_button("Descargar cronograma (CSV)", sched.to_csv(index=False).encode("utf-8"),
-                       "cronograma_manejo_manual.csv", "text/csv")
+                       "cronograma_manejo_manual.csv", "text/csv", key="dl_crono")
 else:
     st.info("Activa alguna intervención y define la(s) fecha(s).")
 
 # =========================== Descargas de series ======================
 out = df_plot.copy()
-out["EMERREL_supresion"]           = emerrel_supresion
-out["EMERREL_supresion_ctrl"]      = emerrel_supresion_ctrl
-out["Plantas_m2_supresion"]        = np.round(plantas_supresion, 1)
-out["Plantas_m2_supresion_ctrl"]   = np.round(plantas_supresion_ctrl, 1)
+out.rename(columns={"EMERREL": "EMERREL_cruda"}, inplace=True)
+out["EMERREL_supresion"]         = emerrel_supresion
+out["EMERREL_supresion_ctrl"]    = emerrel_supresion_ctrl
 
-# columnas mensuales (solo las fechas checkpoint)
-if len(df_mensual):
-    mcols = df_mensual[["fecha","Plantas_m2_supresion","Plantas_m2_supresion_ctrl"]].copy()
-    mcols.columns = ["fecha_mensual","Plantas_m2_supresion_M","Plantas_m2_supresion_ctrl_M"]
+if factor_area_to_plants is not None:
+    out["plm2dia_cruda"]             = np.round(plantas_emerrel_cruda, 4)
+    out["plm2dia_supresion"]         = np.round(plantas_supresion, 4)
+    out["plm2dia_supresion_ctrl"]    = np.round(plantas_supresion_ctrl, 4)
+
+    # Exportar A2 acumulado (cap) alineado a sus fechas
+    a2cum_df = pd.DataFrame({
+        "fecha": pd.to_datetime(A2_cum_sup_cap.index),
+        "A2_acum_sup_cap": A2_cum_sup_cap.values,
+        "A2_acum_sup_ctrl_cap": A2_cum_ctrl_cap.values
+    })
 else:
-    mcols = pd.DataFrame(columns=["fecha_mensual","Plantas_m2_supresion_M","Plantas_m2_supresion_ctrl_M"])
+    a2cum_df = pd.DataFrame(columns=["fecha","A2_acum_sup_cap","A2_acum_sup_ctrl_cap"])
 
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + f" · A2 (mensual) con tope máx = {MAX_PLANTS_CAP:.0f} pl·m² · A2 = suma de checkpoints mensuales")
-    default_cols = [
-        "fecha",
-        "EMERREL_supresion", "EMERREL_supresion_ctrl",
-        "Plantas_m2_supresion", "Plantas_m2_supresion_ctrl",
-    ]
-    out_show = out[default_cols].copy()
-
+    st.caption(conv_caption + " · Columnas en pl·m²·día⁻¹ (escala por AUC) y A2 acumulado (cap 250).")
+    cols_show = ["fecha","EMERREL_cruda","EMERREL_supresion","EMERREL_supresion_ctrl"]
+    if factor_area_to_plants is not None:
+        cols_show += ["plm2dia_cruda","plm2dia_supresion","plm2dia_supresion_ctrl"]
+    out_show = out[cols_show].copy()
     st.dataframe(out_show.tail(20), use_container_width=True)
     st.download_button("Descargar serie procesada (CSV)",
                        out_show.to_csv(index=False).encode("utf-8"),
-                       "serie_procesada.csv", "text/csv")
-    if len(mcols):
-        st.download_button(
-            "Descargar checkpoints mensuales (CSV)",
-            mcols.to_csv(index=False).encode("utf-8"),
-            "checkpoints_mensuales.csv",
-            "text/csv",
-            key="dl_checkpoints_mensuales_descargas"
-        )
+                       "serie_procesada_auc.csv", "text/csv", key="dl_serie")
+
+    if len(a2cum_df):
+        st.download_button("Descargar A2 acumulado (CSV)",
+                           a2cum_df.to_csv(index=False).encode("utf-8"),
+                           "A2_acumulado.csv", "text/csv", key="dl_a2cum")
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
 diag = {
     "siembra": str(sow_date),
-    "pico_emerrel_cruda": float(pico_emerrel),
-    "factor_pl_m2_por_EMERREL_cruda": float(factor_pl) if (factor_pl is not None) else None,
-    "pico_emerrel_mapeado_pl_m2": float(mapped_max) if np.isfinite(mapped_max) else None,
-    "target_pl_m2": MAX_PLANTS_CAP,
-    "suma_supresion_EMERRELx(1-Ciec)": float(np.nansum(emerrel_supresion)),
-    "suma_supresion_ctrl_EMERRELx(1-Ciec)xcontrol": float(np.nansum(emerrel_supresion_ctrl)),
-    # A2 por sumatoria de checkpoints mensuales
-    "A2_sup_raw_sum_mensual": A2_sup_raw,
-    "A2_sup_ctrl_raw_sum_mensual": A2_ctrl_raw,
-    "A2_sup_cap": A2_sup_final,
-    "A2_sup_ctrl_cap": A2_ctrl_final,
+    # AUCs
+    "AUC_EMERREL_cruda_desde_siembra_dias": float(auc_cruda),
+    "AUC_supresion_desde_siembra_dias": float(auc_sup),
+    "AUC_supresion_ctrl_desde_siembra_dias": float(auc_sup_ctrl),
+    # Escala por área
+    "factor_pl_m2_por_EMERREL_dia": float(factor_area_to_plants) if (factor_area_to_plants is not None) else None,
+    "target_pl_m2_total_area": MAX_PLANTS_CAP,
+    # A2
+    "A2_sup_raw_por_AUC": float(A2_sup_raw) if np.isfinite(A2_sup_raw) else None,
+    "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else None,
+    "A2_sup_cap": float(A2_sup_final) if np.isfinite(A2_sup_final) else None,
+    "A2_ctrl_cap": float(A2_ctrl_final) if np.isfinite(A2_ctrl_final) else None,
+    # A2 acumulado (últimos)
+    "A2_cum_sup_cap_final": float(A2_cum_sup_cap.values[-1]) if len(A2_cum_sup_cap) else None,
+    "A2_cum_ctrl_cap_final": float(A2_cum_ctrl_cap.values[-1]) if len(A2_cum_ctrl_cap) else None,
     # Ciec
     "LAIhc": float(LAIhc),
     "Ciec_min_max": (float(np.nanmin(Ciec)), float(np.nanmax(Ciec))) if len(Ciec) else None,
+    # Manejo
     "decaimiento": decaimiento_tipo,
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
