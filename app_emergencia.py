@@ -2,10 +2,11 @@
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI), con curva opcional
-# - Equivalencia POR ÁREA: AUC[EMERREL (cruda)] ≙ 250 pl·m² (competencia máxima)
-# - A2 = 250 * ( AUC[supresión] / AUC[cruda] )   y   A2_ctrl = 250 * ( AUC[supresión×control] / AUC[cruda] )
-# - Pérdida de rinde calculada con A2 (cap 250)
-# - Nuevo: curva de A2 acumulado (integral corrida) vs tiempo (supresión y supresión+control)
+# - Equivalencia POR ÁREA: AUC[EMERREL (cruda)] ≙ CAP (100/250/500 pl·m²)
+# - A2 = CAP * ( AUC[supresión] / AUC[cruda] )   y   A2_ctrl = CAP * ( AUC[supresión×control] / AUC[cruda] )
+# - Pérdida de rinde calculada con A2 (cap elegido)
+# - Curva de A2 acumulado (integral corrida) vs tiempo
+# - Eje derecho: series instantáneas en pl·m²·día⁻¹ (escala por AUC), con dtick dinámico
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -19,11 +20,7 @@ from datetime import timedelta
 APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC)"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("Escala por área: AUC de EMERREL (cruda) ≙ 250 pl·m². A2, pérdida de rinde y A2 acumulado usan esa escala. No se calcula ICIC.")
-
-# ========================== Constantes clave ==========================
-NR_DAYS_DEFAULT = 10
-MAX_PLANTS_CAP  = 250.0  # pl·m² (competencia máxima)
+st.caption("Escala por área: AUC de EMERREL (cruda) ≙ CAP seleccionado (100/250/500 pl·m²). A2, pérdida de rinde y A2 acumulado usan esa escala. No se calcula ICIC.")
 
 # ============================== Utils ================================
 def safe_nanmax(arr, fallback=0.0):
@@ -95,33 +92,27 @@ def percentiles_from_emerrel(emerrel: pd.Series, dates: pd.Series):
     return P, work, total
 
 def _to_days(ts: pd.Series) -> np.ndarray:
-    """Convierte timestamps a días (float) desde el primer punto."""
-    t = pd.to_datetime(ts).astype("int64") / 1e9  # segundos
+    f = pd.to_datetime(ts)
+    t = f.view("int64") / 1e9  # segundos
     t = (t - t.iloc[0]) / 86400.0  # días
     return t.to_numpy(dtype=float)
 
 def auc_time(fecha: pd.Series, y: np.ndarray, mask=None) -> float:
-    """AUC por regla trapezoidal usando fechas reales (espaciado irregular)."""
-    if mask is not None:
-        fecha = fecha[mask]
-        y = y[mask]
-    if len(fecha) < 2:
-        return 0.0
-    tdays = _to_days(pd.to_datetime(fecha))
-    y = np.asarray(y, dtype=float)
-    y = np.nan_to_num(y, nan=0.0, posinf=0.0, neginf=0.0)
-    try:
-        return float(np.trapz(y, tdays))
-    except Exception:
-        return 0.0
-
-def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Series:
-    """Integral corrida (trapezoidal) desde el primer punto válido; respeta huecos y espaciado."""
     f = pd.to_datetime(fecha)
     y_arr = np.asarray(y, dtype=float)
     if mask is not None:
-        f = f[mask]
-        y_arr = y_arr[mask]
+        f = f[mask]; y_arr = y_arr[mask]
+    if len(f) < 2:
+        return 0.0
+    tdays = _to_days(f)
+    y_arr = np.nan_to_num(y_arr, nan=0.0, posinf=0.0, neginf=0.0)
+    return float(np.trapz(y_arr, tdays))
+
+def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Series:
+    f = pd.to_datetime(fecha)
+    y_arr = np.asarray(y, dtype=float)
+    if mask is not None:
+        f = f[mask]; y_arr = y_arr[mask]
     if len(f) == 0:
         return pd.Series(dtype=float)
     t = _to_days(f)
@@ -131,46 +122,6 @@ def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Seri
         dt_i = max(0.0, t[i] - t[i-1])
         out[i] = out[i-1] + 0.5 * (y_arr[i-1] + y_arr[i]) * dt_i
     return pd.Series(out, index=f)
-
-# ======================= Canopia (sin ICIC): FC y LAI =================
-def compute_canopy(
-    fechas: pd.Series,
-    sow_date: dt.date,
-    mode_canopy: str,
-    t_lag: int,
-    t_close: int,
-    cov_max: float,
-    lai_max: float,
-    k_beer: float,
-):
-    """Devuelve (FC dinámica, LAI) sin ICIC."""
-    days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
-
-    def logistic_between(days, start, end, y_max):
-        if end <= start:
-            end = start + 1
-        t_mid = 0.5 * (start + end)
-        r = 4.0 / max(1.0, (end - start))
-        return y_max / (1.0 + np.exp(-r * (days - t_mid)))
-
-    if mode_canopy == "Cobertura dinámica (%)":
-        fc_dyn = np.where(
-            days_since_sow < t_lag, 0.0,
-            logistic_between(days_since_sow, t_lag, t_close, cov_max/100.0)
-        )
-        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
-        LAI = -np.log(np.clip(1.0 - fc_dyn, 1e-9, 1.0)) / max(1e-6, k_beer)
-        LAI = np.clip(LAI, 0.0, lai_max)
-    else:
-        LAI = np.where(
-            days_since_sow < t_lag, 0.0,
-            logistic_between(days_since_sow, t_lag, t_close, lai_max)
-        )
-        LAI = np.clip(LAI, 0.0, lai_max)
-        fc_dyn = 1 - np.exp(-k_beer * LAI)
-        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
-
-    return fc_dyn, LAI
 
 # ========================= Sidebar: datos base =========================
 with st.sidebar:
@@ -185,7 +136,8 @@ with st.sidebar:
     dedup = st.selectbox("Si hay fechas duplicadas…", ["sumar", "promediar", "primera"], index=0)
     fill_gaps = st.checkbox("Rellenar días faltantes con 0", value=False)
 
-if up is None and not url:
+# Bloqueo si no hay datos
+if "up" in locals() and up is None and not url:
     st.info("Subí un CSV o pegá una URL para continuar.")
     st.stop()
 
@@ -269,20 +221,51 @@ with st.sidebar:
 
 # =========== Etiquetas/visual + avanzadas =============================
 with st.sidebar:
+    st.header("Tope (equivalencia AUC cruda)")
+    cap_choice = st.selectbox("AUC cruda ≙ (pl·m²)", [500, 250, 100], index=0)
+    MAX_PLANTS_CAP = float(cap_choice)  # ← tope elegido
+
     st.header("Etiquetas y escalas")
     show_plants_axis = st.checkbox("Mostrar Plantas·m² en eje derecho", value=True)
     show_ciec_curve = st.checkbox("Mostrar curva Ciec (0–1)", value=True)
     highlight_labels = st.checkbox("Etiquetas destacadas en bandas", value=True)
 
     st.header("Visualización avanzada")
-    show_emac_curve_raw = st.checkbox("Mostrar EMERAC (curva) cruda", value=False)
-    show_emac_points_raw = st.checkbox("Mostrar EMERAC (puntos) cruda", value=False)
     show_nonres_bands = st.checkbox("Marcar bandas NR (por defecto 10 días)", value=True)
+
+# Sugerir dtick según tope
+def suggest_dtick(cap: float) -> float:
+    if cap >= 500: return 100.0
+    if cap >= 250: return 50.0
+    return 20.0
+
+DTICK_RIGHT = suggest_dtick(MAX_PLANTS_CAP)
 
 if not (sow_min <= sow_date <= sow_max):
     st.error("La fecha de siembra debe estar entre el 1 de mayo y el 1 de julio."); st.stop()
 
 # ============================ FC/LAI + Ciec ===========================
+def compute_canopy(
+    fechas: pd.Series, sow_date: dt.date, mode_canopy: str,
+    t_lag: int, t_close: int, cov_max: float, lai_max: float, k_beer: float,
+):
+    days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
+    def logistic_between(days, start, end, y_max):
+        if end <= start: end = start + 1
+        t_mid = 0.5 * (start + end); r = 4.0 / max(1.0, (end - start))
+        return y_max / (1.0 + np.exp(-r * (days - t_mid)))
+    if mode_canopy == "Cobertura dinámica (%)":
+        fc_dyn = np.where(days_since_sow < t_lag, 0.0, logistic_between(days_since_sow, t_lag, t_close, cov_max/100.0))
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
+        LAI = -np.log(np.clip(1.0 - fc_dyn, 1e-9, 1.0)) / max(1e-6, k_beer)
+        LAI = np.clip(LAI, 0.0, lai_max)
+    else:
+        LAI = np.where(days_since_sow < t_lag, 0.0, logistic_between(days_since_sow, t_lag, t_close, lai_max))
+        LAI = np.clip(LAI, 0.0, lai_max)
+        fc_dyn = 1 - np.exp(-k_beer * LAI)
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
+    return fc_dyn, LAI
+
 FC, LAI = compute_canopy(
     fechas=df_plot["fecha"], sow_date=sow_date, mode_canopy=mode_canopy,
     t_lag=int(t_lag), t_close=int(t_close),
@@ -297,7 +280,6 @@ else:
     Ciec = np.zeros_like(LAI, dtype=float)
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
-_, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 
 # ===== Supresión (base agronómica) ===================================
 emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0)
@@ -320,6 +302,7 @@ else:
     conv_caption = "No se pudo escalar por área (AUC de EMERREL cruda = 0)."
 
 # =================== Manejo (control) y decaimientos ===================
+NR_DAYS_DEFAULT = 10
 sched_rows = []
 def add_sched(nombre, fecha_ini, dias_res=None, nota=""):
     if not fecha_ini: return
@@ -328,8 +311,7 @@ def add_sched(nombre, fecha_ini, dias_res=None, nota=""):
 
 with st.sidebar:
     st.header("Manejo pre-siembra (manual)")
-    min_date = ts.min().date()
-    max_date = ts.max().date()
+    min_date = ts.min().date(); max_date = ts.max().date()
     pre_glifo = st.checkbox("Herbicida total (glifosato)", value=False)
     pre_glifo_date = st.date_input("Fecha glifosato (pre)", value=min_date, min_value=min_date, max_value=max_date, disabled=not pre_glifo)
 
@@ -406,28 +388,22 @@ def weights_residual(start_date, dias):
     w = np.zeros_like(fechas_d, dtype=float)
     if (not start_date) or (not dias) or (int(dias) <= 0):
         return w
-    d0 = start_date
-    d1 = start_date + timedelta(days=int(dias))
+    d0 = start_date; d1 = start_date + timedelta(days=int(dias))
     mask = (fechas_d >= d0) & (fechas_d < d1)
-    if not mask.any():
-        return w
-    idxs = np.where(mask)[0]
-    t_rel = np.arange(len(idxs), dtype=float)
+    if not mask.any(): return w
+    idxs = np.where(mask)[0]; t_rel = np.arange(len(idxs), dtype=float)
     if decaimiento_tipo == "Ninguno":
         w[idxs] = 1.0
     elif decaimiento_tipo == "Lineal":
-        L = max(1, len(idxs))
-        w[idxs] = 1.0 - (t_rel / max(1.0, L - 1))
-    else:  # Exponencial
-        assert lam_exp is not None
-        w[idxs] = np.exp(-lam_exp * t_rel)
+        L = max(1, len(idxs)); w[idxs] = 1.0 - (t_rel / max(1.0, L - 1))
+    else:
+        assert lam_exp is not None; w[idxs] = np.exp(-lam_exp * t_rel)
     return w
 
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
 
 def apply_efficiency(weights, eff_pct):
-    if eff_pct <= 0:
-        return
+    if eff_pct <= 0: return
     reduc = np.clip(1.0 - (eff_pct/100.0) * weights, 0.0, 1.0)
     np.multiply(ctrl_factor, reduc, out=ctrl_factor)
 
@@ -465,23 +441,14 @@ else:
 
 # =========== Curvas A2 acumulado (integral corrida desde siembra) =====
 if factor_area_to_plants is not None:
-    # series recortadas a ≥ siembra
-    ts_sow = ts[mask_after_sow]
-    sup_sow = emerrel_supresion[mask_after_sow]
-    sup_ctrl_sow = emerrel_supresion_ctrl[mask_after_sow]
-
-    auc_cum_sup = cumulative_auc_series(ts, emerrel_supresion, mask=mask_after_sow)          # (EMERREL·día) acumulado
+    auc_cum_sup  = cumulative_auc_series(ts, emerrel_supresion, mask=mask_after_sow)
     auc_cum_ctrl = cumulative_auc_series(ts, emerrel_supresion_ctrl, mask=mask_after_sow)
-
-    A2_cum_sup = auc_cum_sup * factor_area_to_plants                                        # pl·m² acumulado
-    A2_cum_ctrl = auc_cum_ctrl * factor_area_to_plants
-
-    # cap a 250
-    A2_cum_sup_cap = A2_cum_sup.clip(upper=MAX_PLANTS_CAP)
-    A2_cum_ctrl_cap = A2_cum_ctrl.clip(upper=MAX_PLANTS_CAP)
+    A2_cum_sup   = auc_cum_sup  * factor_area_to_plants
+    A2_cum_ctrl  = auc_cum_ctrl * factor_area_to_plants
+    A2_cum_sup_cap   = A2_cum_sup.clip(upper=MAX_PLANTS_CAP)
+    A2_cum_ctrl_cap  = A2_cum_ctrl.clip(upper=MAX_PLANTS_CAP)
 else:
-    ts_sow = pd.to_datetime([])
-    A2_cum_sup_cap = pd.Series(dtype=float)
+    A2_cum_sup_cap  = pd.Series(dtype=float)
     A2_cum_ctrl_cap = pd.Series(dtype=float)
 
 # ============================== Gráfico 1 ==============================
@@ -545,7 +512,7 @@ if show_nonres_bands:
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
     if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
 
-# Ejes y escalas
+# Ejes y escalas principales
 ymax = max(
     1e-6,
     1.15 * max(
@@ -554,7 +521,6 @@ ymax = max(
         safe_nanmax(emerrel_supresion_ctrl, 0.0),
     )
 )
-
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
     title="EMERREL + Supresión (1−Ciec) + Control" + (" + Ciec" if use_ciec else ""),
@@ -582,7 +548,7 @@ if show_plants_axis and (factor_area_to_plants is not None) and np.isfinite(fact
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
-        dtick=50
+        dtick=DTICK_RIGHT
     )
 
     fig.add_trace(go.Scatter(
@@ -657,8 +623,9 @@ if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
         line=dict(dash="dot"),
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (ctrl): %{y:.1f} pl·m²<extra></extra>"
     ))
-    # Línea tope 250
-    fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash", annotation_text="Tope 250", annotation_position="top left")
+    # Línea tope dinámica
+    fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash",
+                     annotation_text=f"Tope {MAX_PLANTS_CAP:.0f}", annotation_position="top left")
 
     # Marcadores en el último punto
     fig_a2.add_trace(go.Scatter(
@@ -671,7 +638,7 @@ if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
     ))
 
 fig_a2.update_layout(
-    title="A2 acumulado (pl·m²) por integración temporal (cap 250)",
+    title=f"A2 acumulado (pl·m²) por integración temporal (cap {MAX_PLANTS_CAP:.0f})",
     xaxis_title="Fecha",
     yaxis_title="A2 acumulado (pl·m²)",
     margin=dict(l=10, r=10, t=40, b=10)
@@ -699,8 +666,8 @@ if np.isfinite(A2_ctrl_final):
     ))
 
 fig_loss.update_layout(
-    title="Pérdida de rendimiento (%) vs. A2 (pl·m²) — escala por AUC",
-    xaxis_title="A2 (pl·m²) — área bajo la curva (tope 250)",
+    title=f"Pérdida de rendimiento (%) vs. A2 (pl·m²) — escala por AUC (cap {MAX_PLANTS_CAP:.0f})",
+    xaxis_title=f"A2 (pl·m²) — área bajo la curva (tope {MAX_PLANTS_CAP:.0f})",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
 )
@@ -726,7 +693,6 @@ if factor_area_to_plants is not None:
     out["plm2dia_supresion"]         = np.round(plantas_supresion, 4)
     out["plm2dia_supresion_ctrl"]    = np.round(plantas_supresion_ctrl, 4)
 
-    # Exportar A2 acumulado (cap) alineado a sus fechas
     a2cum_df = pd.DataFrame({
         "fecha": pd.to_datetime(A2_cum_sup_cap.index),
         "A2_acum_sup_cap": A2_cum_sup_cap.values,
@@ -736,7 +702,7 @@ else:
     a2cum_df = pd.DataFrame(columns=["fecha","A2_acum_sup_cap","A2_acum_sup_ctrl_cap"])
 
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + " · Columnas en pl·m²·día⁻¹ (escala por AUC) y A2 acumulado (cap 250).")
+    st.caption(conv_caption + f" · Columnas en pl·m²·día⁻¹ (escala por AUC) y A2 acumulado (cap {MAX_PLANTS_CAP:.0f}).")
     cols_show = ["fecha","EMERREL_cruda","EMERREL_supresion","EMERREL_supresion_ctrl"]
     if factor_area_to_plants is not None:
         cols_show += ["plm2dia_cruda","plm2dia_supresion","plm2dia_supresion_ctrl"]
