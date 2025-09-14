@@ -263,6 +263,17 @@ with st.sidebar:
 MAX_PLANTS_CAP = float(cap_choice)
 DTICK_RIGHT = {850: 170, 500: 100, 250: 50, 100: 20}.get(int(MAX_PLANTS_CAP), max(10, round(MAX_PLANTS_CAP/5)))
 
+# ========================= Periodo crítico (PC) ========================
+with st.sidebar:
+    st.header("Periodo crítico")
+    st.caption("Enfoque rápido de la ventana **11 de septiembre → 15 de noviembre** del año de referencia.")
+    use_pc = st.checkbox("Activar periodo crítico (11‑Sep → 15‑Nov)", value=False)
+
+# Fecha de referencia para PC (mismo año que la siembra o, en su defecto, el predominante del dataset)
+year_pc = int(sow_date.year if sow_date else (years.mode().iloc[0] if len(years) else dt.date.today().year))
+PC_START = pd.to_datetime(f"{year_pc}-09-11")
+PC_END   = pd.to_datetime(f"{year_pc}-11-15")
+
 # =========== Etiquetas/visual + avanzadas =============================
 with st.sidebar:
     st.header("Etiquetas y escalas")
@@ -611,6 +622,18 @@ if use_ciec and show_ciec_curve:
     ))
 
 fig.update_layout(**layout_kwargs)
+
+# === Enfoque de periodo crítico (si está activado) ===
+if 'use_pc' in globals() and use_pc:
+    try:
+        fig.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
+        fig.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.04, xref="x", yref="paper",
+                           text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
+                           bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
+        fig.update_xaxes(range=[PC_START, PC_END])
+    except Exception:
+        pass
+
 st.plotly_chart(fig, use_container_width=True)
 st.caption(conv_caption + f" · A2 (por AUC) con tope = {MAX_PLANTS_CAP:.0f} pl·m².")
 
@@ -664,6 +687,18 @@ if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
         x=[A2_cum_ctrl_cap.index[-1]], y=[A2_cum_ctrl_cap.values[-1]], mode="markers+text",
         name="Final supresión+control", text=[f"{A2_cum_ctrl_cap.values[-1]:.1f}"], textposition="bottom center"
     ))
+
+# === Enfoque de periodo crítico en A2 (si está activado) ===
+if 'use_pc' in globals() and use_pc:
+    try:
+        fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
+        fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
+                              text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
+                              bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
+        fig_a2.update_xaxes(range=[PC_START, PC_END])
+    except Exception:
+        pass
+
 fig_a2.update_layout(
     title=f"A2 acumulado (pl·m²) por integración temporal (cap {MAX_PLANTS_CAP:.0f})",
     xaxis_title="Fecha",
