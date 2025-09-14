@@ -626,9 +626,9 @@ fig.update_layout(**layout_kwargs)
 # === Enfoque de periodo crítico (si está activado) ===
 if 'use_pc' in globals() and use_pc:
     try:
-        fig.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="LightYellow", opacity=0.12)
+        fig.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
         fig.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.04, xref="x", yref="paper",
-                           text="Periodo crítico", showarrow=False, bgcolor="rgba(255,255,153,0.85)",
+                           text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
                            bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
         
     except Exception:
@@ -691,9 +691,9 @@ if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
 # === Enfoque de periodo crítico en A2 (si está activado) ===
 if 'use_pc' in globals() and use_pc:
     try:
-        fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="LightYellow", opacity=0.12)
+        fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
         fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
-                              text="Periodo crítico", showarrow=False, bgcolor="rgba(255,255,153,0.85)",
+                              text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
                               bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
         
     except Exception:
