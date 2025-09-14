@@ -237,11 +237,11 @@ with st.expander("Seleccionar columnas y depurar datos", expanded=True):
 # ==================== Siembra & parámetros de canopia ==================
 years = df_plot["fecha"].dt.year.dropna().astype(int)
 year_ref = int(years.mode().iloc[0]) if len(years) else dt.date.today().year
-sow_min = dt.date(year_ref, 5, 1); sow_max = dt.date(year_ref, 7, 1)
+sow_min = dt.date(year_ref, 5, 1); sow_max = dt.date(year_ref, 8, 1)
 
 with st.sidebar:
     st.header("Siembra & Canopia (para Ciec)")
-    st.caption(f"Ventana de siembra: **{sow_min} → {sow_max}**")
+    st.caption(f"Ventana de siembra: **{sow_min} → {sow_max}** (1 de mayo al 1 de agosto)")
     sow_date = st.date_input("Fecha de siembra", value=sow_min, min_value=sow_min, max_value=sow_max)
     mode_canopy = st.selectbox("Canopia", ["Cobertura dinámica (%)", "LAI dinámico"], index=0)
     t_lag = st.number_input("Días a emergencia del cultivo (lag)", 0, 60, 7, 1)
@@ -271,7 +271,7 @@ with st.sidebar:
     show_nonres_bands = st.checkbox("Marcar bandas NR (por defecto 10 días)", value=True)
 
 if not (sow_min <= sow_date <= sow_max):
-    st.error("La fecha de siembra debe estar entre el 1 de mayo y el 1 de julio."); st.stop()
+    st.error("La fecha de siembra debe estar entre el 1 de mayo y el 1 de agosto."); st.stop()
 
 # ============================ FC/LAI + Ciec ===========================
 FC, LAI = compute_canopy(
@@ -357,8 +357,8 @@ for w in warnings: st.warning(w)
 if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Barbecho")
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
+# Post graminicida: mostrar ventana hacia atrás en cronograma
 if post_gram:
-    # Mostrar ventana hacia atrás en el cronograma
     back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_DAYS_DEFAULT-1)).date()
     sched_rows.append({"Intervención": "Post · graminicida selectivo (NR, −10d)", "Inicio": str(back_ini), "Fin": str(post_gram_date), "Nota": f"Ventana hacia atrás {NR_DAYS_DEFAULT}d"})
 if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias}d")
@@ -414,6 +414,7 @@ def weights_residual(start_date, dias):
         assert lam_exp is not None
         w[idxs] = np.exp(-lam_exp * t_rel)
     return w
+
 def weights_backward(center_date, dias):
     """
     Ventana HACIA ATRÁS de longitud 'dias' que incluye el día de aplicación.
@@ -429,7 +430,6 @@ def weights_backward(center_date, dias):
     w[mask] = 1.0
     return w
 
-
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
 def apply_efficiency(weights, eff_pct):
     if eff_pct <= 0:
@@ -441,6 +441,7 @@ def apply_efficiency(weights, eff_pct):
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
+# Graminicida post: ventana hacia atrás 10 días
 if post_gram: apply_efficiency(weights_backward(post_gram_date, NR_DAYS_DEFAULT), ef_post_gram)
 if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), ef_post_selR)
 
@@ -543,7 +544,7 @@ if show_nonres_bands:
         x_app = pd.to_datetime(post_gram_date)
         x0 = x_app - pd.Timedelta(days=NR_DAYS_DEFAULT-1)
         x1 = x_app + pd.Timedelta(days=1)
-        fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.20)
+        fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.25)
         _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_DAYS_DEFAULT}d)", "rgba(144,238,144,0.85)")
 
 # Ejes y escalas
