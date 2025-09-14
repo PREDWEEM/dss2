@@ -630,7 +630,7 @@ if 'use_pc' in globals() and use_pc:
         fig.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.04, xref="x", yref="paper",
                            text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
                            bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
-        fig.update_xaxes(range=[PC_START, PC_END])
+        
     except Exception:
         pass
 
@@ -695,7 +695,7 @@ if 'use_pc' in globals() and use_pc:
         fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
                               text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
                               bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
-        fig_a2.update_xaxes(range=[PC_START, PC_END])
+        
     except Exception:
         pass
 
