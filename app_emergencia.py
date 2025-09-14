@@ -357,7 +357,10 @@ for w in warnings: st.warning(w)
 if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Barbecho")
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
-if post_gram: add_sched(f"Post · graminicida selectivo (NR)", post_gram_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
+if post_gram:
+    # Mostrar ventana hacia atrás en el cronograma
+    back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_DAYS_DEFAULT-1)).date()
+    sched_rows.append({"Intervención": "Post · graminicida selectivo (NR, −10d)", "Inicio": str(back_ini), "Fin": str(post_gram_date), "Nota": f"Ventana hacia atrás {NR_DAYS_DEFAULT}d"})
 if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias}d")
 sched = pd.DataFrame(sched_rows)
 
@@ -411,6 +414,21 @@ def weights_residual(start_date, dias):
         assert lam_exp is not None
         w[idxs] = np.exp(-lam_exp * t_rel)
     return w
+def weights_backward(center_date, dias):
+    """
+    Ventana HACIA ATRÁS de longitud 'dias' que incluye el día de aplicación.
+    Ej.: dias=10 → afecta [aplicación-9, …, aplicación].
+    """
+    w = np.zeros_like(fechas_d, dtype=float)
+    if (not center_date) or (not dias) or (int(dias) <= 0):
+        return w
+    d_center = center_date
+    d0 = d_center - timedelta(days=int(dias)-1)
+    d1 = d_center + timedelta(days=1)  # límite superior exclusivo
+    mask = (fechas_d >= d0) & (fechas_d < d1)
+    w[mask] = 1.0
+    return w
+
 
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
 def apply_efficiency(weights, eff_pct):
@@ -423,7 +441,7 @@ def apply_efficiency(weights, eff_pct):
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
-if post_gram: apply_efficiency(weights_residual(post_gram_date, NR_DAYS_DEFAULT), ef_post_gram)
+if post_gram: apply_efficiency(weights_backward(post_gram_date, NR_DAYS_DEFAULT), ef_post_gram)
 if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), ef_post_selR)
 
 # ==================== Control sobre SUPRESIÓN ==========================
@@ -520,7 +538,13 @@ if post_selR: add_residual_band(post_selR_date, post_res_dias, f"Residual post {
 if show_nonres_bands:
     if pre_glifo: add_one_day_band(pre_glifo_date, "Glifo (1d)")
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
-    if post_gram: add_residual_band(post_gram_date, NR_DAYS_DEFAULT, f"Graminicida ({NR_DAYS_DEFAULT}d)")
+    if post_gram:
+        # Banda hacia atrás para el graminicida post
+        x_app = pd.to_datetime(post_gram_date)
+        x0 = x_app - pd.Timedelta(days=NR_DAYS_DEFAULT-1)
+        x1 = x_app + pd.Timedelta(days=1)
+        fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.20)
+        _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_DAYS_DEFAULT}d)", "rgba(144,238,144,0.85)")
 
 # Ejes y escalas
 ymax = max(
@@ -736,4 +760,3 @@ diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(diag, ensure_ascii=False, indent=2))
-
