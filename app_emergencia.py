@@ -665,6 +665,8 @@ st.markdown(
 """
 )
 # ======================= Pérdida de rendimiento (%) ===================
+# -*- coding: utf-8 -*-
+# app.py — Versión PREDWEEM sin x₁ (solo x₂ y x₃)
 
 # Función: pérdida de rendimiento según densidad efectiva
 def perdida_rinde_pct(x):
@@ -683,9 +685,24 @@ if factor_area_to_plants is not None:
 
     X2 = float(np.nansum(plm2dia_x2[mask_after_sow]))
     X3 = float(np.nansum(plm2dia_x3[mask_after_sow]))
+    loss_x2_pct = float(perdida_rinde_pct(X2)) if np.isfinite(X2) else float("nan")
+    loss_x3_pct = float(perdida_rinde_pct(X3)) if np.isfinite(X3) else float("nan")
 else:
     plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_base), np.nan)
     X2 = X3 = float("nan")
+
+# Mostrar resultados
+st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
+
+st.markdown(
+    f"""
+### x₂ — Con supresión (sin control)  
+x = **{X2:,.1f}** pl·m² → pérdida estimada: **{loss_x2_pct:.2f}%**
+
+### x₃ — Con supresión + control  
+x = **{X3:,.1f}** pl·m² → pérdida estimada: **{loss_x3_pct:.2f}%**
+"""
+)
 
 # ================= Gráfico: Pérdida (%) vs x =================
 
