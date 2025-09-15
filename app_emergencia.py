@@ -659,9 +659,7 @@ st.caption(conv_caption + f" · A2 (por AUC) con tope = {MAX_PLANTS_CAP:.0f} pl�
 st.subheader("Plantas·m² que escapan — Área bajo la curva (AUC) con tope")
 st.markdown(
     f"""
-# **A2 — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
-# **A2 — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
-**x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
+ **x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
 # ======================= Pérdida de rendimiento (%) ===================
