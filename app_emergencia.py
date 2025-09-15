@@ -666,15 +666,9 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
-loss_x_pct = float(perdida_rinde_pct(X_eff_pc)) if np.isfinite(X_eff_pc) else float("nan")
-
-st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
-st.markdown(
-    f"""
-**Con fenología y manejo (x):** **{loss_x_pct:,.2f}%**  
-x = {X_eff_pc:,.1f} pl·m² (densidad efectiva desde siembra)
-"""
-)
+def perdida_rinde_pct(x):
+    x = np.asarray(x, dtype=float)
+    return 0.375 * x / (1.0 + (0.375 * x / 76.639))
 
 # ============== Gráfico: A2 y x acumulado (integral corrida) ===============
 st.subheader("Acumulados desde siembra (pl·m²)")
