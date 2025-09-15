@@ -687,6 +687,45 @@ else:
     plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_base), np.nan)
     X2 = X3 = float("nan")
 
+# =================== x acumulado desde siembra (x₁, x₂, x₃) ===================
+if factor_area_to_plants is not None:
+    plm2dia_x1 = emerrel_eff_base * factor_area_to_plants  # x₁ = EMERREL × FC
+    x1_cum = np.cumsum(plm2dia_x1)
+    x2_cum = np.cumsum(plm2dia_x2)
+    x3_cum = np.cumsum(plm2dia_x3)
+else:
+    plm2dia_x1 = np.full(len(ts), np.nan)
+    x1_cum = x2_cum = x3_cum = np.full(len(ts), np.nan)
+
+# ======================= Gráfico: x acumulado (x₁, x₂, x₃) =======================
+fig_xcum = go.Figure()
+
+fig_xcum.add_trace(go.Scatter(
+    x=ts, y=x1_cum, mode="lines", name="x₁: sin supresión ni control",
+    line=dict(dash="dot"), hovertemplate="x₁ acumulado: %{y:.1f}<extra></extra>"
+))
+fig_xcum.add_trace(go.Scatter(
+    x=ts, y=x2_cum, mode="lines", name="x₂: con supresión",
+    line=dict(dash="dash"), hovertemplate="x₂ acumulado: %{y:.1f}<extra></extra>"
+))
+fig_xcum.add_trace(go.Scatter(
+    x=ts, y=x3_cum, mode="lines", name="x₃: con supresión + control",
+    line=dict(width=3), hovertemplate="x₃ acumulado: %{y:.1f}<extra></extra>"
+))
+
+if use_pc:
+    fig_xcum.add_vrect(x0=PC_START, x1=PC_END, line_width=0,
+                       fillcolor="LightSkyBlue", opacity=0.2)
+
+fig_xcum.update_layout(
+    title="Densidad efectiva acumulada (x) desde la siembra",
+    xaxis_title="Fecha", yaxis_title="x acumulado (pl·m²)",
+    margin=dict(l=10, r=10, t=40, b=10)
+)
+
+st.plotly_chart(fig_xcum, use_container_width=True)
+
+
 # Pérdida de rendimiento para x₂ y x₃
 loss_x2_pct = float(perdida_rinde_pct(X2)) if np.isfinite(X2) else float("nan")
 loss_x3_pct = float(perdida_rinde_pct(X3)) if np.isfinite(X3) else float("nan")
