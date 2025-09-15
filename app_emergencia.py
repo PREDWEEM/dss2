@@ -666,69 +666,39 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
+
+# Función: pérdida de rendimiento según densidad efectiva
 def perdida_rinde_pct(x):
     x = np.asarray(x, dtype=float)
     return 0.375 * x / (1.0 + (0.375 * x / 76.639))
 
-# ============== Gráfico: A2 y x acumulado (integral corrida) ===============
-st.subheader("Acumulados desde siembra (pl·m²)")
-fig_a2 = go.Figure()
+# Densidad efectiva diaria: EMERREL × FC × (1−Ciec) × control
+emerrel_eff = df_plot["EMERREL"].values * FC_state
+emerrel_eff_sup = emerrel_eff * (1.0 - Ciec)
+emerrel_eff_ctrl = emerrel_eff_sup * ctrl_factor
 
-if len(A2_cum_sup_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=A2_cum_sup_cap.index, y=A2_cum_sup_cap.values, mode="lines",
-        name="A2 acum — Supresión",
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (sup): %{y:.1f} pl·m²<extra></extra>"
-    ))
-if len(A2_cum_ctrl_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=A2_cum_ctrl_cap.index, y=A2_cum_ctrl_cap.values, mode="lines",
-        name="A2 acum — Supresión + control",
-        line=dict(dash="dot"),
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (ctrl): %{y:.1f} pl·m²<extra></extra>"
-    ))
-if len(X_cum_eff_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=ts, y=X_cum_eff_cap, mode="lines",
-        name="x acum — (clasificación en PC)",
-        line=dict(dash="dash"),
-        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>x acum: %{y:.1f} pl·m²<extra></extra>"
-    ))
+# Desde la siembra: aplicar escala por área (pl·m²·día⁻¹)
+if factor_area_to_plants is not None:
+    plm2dia_eff_ctrl = emerrel_eff_ctrl * factor_area_to_plants
+    X_eff_pc = float(np.nansum(plm2dia_eff_ctrl[mask_after_sow]))
+else:
+    plm2dia_eff_ctrl = np.full(len(emerrel_eff_ctrl), np.nan)
+    X_eff_pc = float("nan")
 
-fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash",
-                 annotation_text=f"Tope {MAX_PLANTS_CAP:.0f}", annotation_position="top left")
+# Cálculo de pérdida de rendimiento (solo por x)
+loss_x_pct = float(perdida_rinde_pct(X_eff_pc)) if np.isfinite(X_eff_pc) else float("nan")
 
-if len(A2_cum_sup_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=[A2_cum_sup_cap.index[-1]], y=[A2_cum_sup_cap.values[-1]], mode="markers+text",
-        name="Final supresión", text=[f"{A2_cum_sup_cap.values[-1]:.1f}"], textposition="top center"
-    ))
-if len(A2_cum_ctrl_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=[A2_cum_ctrl_cap.index[-1]], y=[A2_cum_ctrl_cap.values[-1]], mode="markers+text",
-        name="Final supresión+control", text=[f"{A2_cum_ctrl_cap.values[-1]:.1f}"], textposition="bottom center"
-    ))
-if len(X_cum_eff_cap):
-    fig_a2.add_trace(go.Scatter(
-        x=[ts.iloc[-1]], y=[X_cum_eff_cap[-1]], mode="markers+text",
-        name="Final x (fenología)", text=[f"{X_cum_eff_cap[-1]:.1f}"], textposition="middle right"
-    ))
-
-if use_pc:
-    fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
-    fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
-                          text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
-                          bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
-
-fig_a2.update_layout(
-    title=f"Acumulados (A2 y x) por integración temporal (cap {MAX_PLANTS_CAP:.0f})",
-    xaxis_title="Fecha",
-    yaxis_title="pl·m² acumulado",
-    margin=dict(l=10, r=10, t=40, b=10)
+# Mostrar en texto
+st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
+st.markdown(
+    f"""
+**Con fenología y manejo (x):** **{loss_x_pct:,.2f}%**  
+x = {X_eff_pc:,.1f} pl·m² (EMERREL × FC × supresión × control, desde siembra)
+"""
 )
-st.plotly_chart(fig_a2, use_container_width=True)
 
-# ============== Gráfico: Pérdida (%) vs A2/x (pl·m²) ====================
+# ================= Gráfico: Pérdida (%) vs x =================
+
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
 
