@@ -817,3 +817,89 @@ _diag = {
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
+
+
+# ===================== Contribución de plantas por estado (S1..S4) =====================
+st.subheader("Contribución de plantas por estado (S1..S4)")
+
+if (factor_area_to_plants is None) or (not np.isfinite(factor_area_to_plants)):
+    st.info("Para ver contribuciones por estado necesitás que la escala por AUC esté activa (AUC cruda > 0).")
+else:
+    # --- Totales por estado (ya calculados arriba en Diagnóstico) ---
+    contrib_dict = {
+        "S1 (FC=0.0)": contrib_S1,
+        "S2 (FC=0.3)": contrib_S2,
+        "S3 (FC=0.6)": contrib_S3,
+        "S4 (FC=1.0)": contrib_S4,
+    }
+    total_pl = float(np.nansum(list(contrib_dict.values())))
+    df_contrib = pd.DataFrame({
+        "Estado": list(contrib_dict.keys()),
+        "pl_m2": [float(v) for v in contrib_dict.values()]
+    }).sort_values("pl_m2", ascending=False).reset_index(drop=True)
+    df_contrib["% del total"] = np.where(
+        np.isfinite(total_pl) & (total_pl > 0),
+        100.0 * df_contrib["pl_m2"] / total_pl,
+        np.nan
+    )
+
+    # --- (1) Gráfico de barras: aporte total por estado ---
+    fig_bar = go.Figure()
+    fig_bar.add_trace(go.Bar(
+        x=df_contrib["Estado"],
+        y=df_contrib["pl_m2"],
+        text=df_contrib["pl_m2"].round(1).astype(str) + " pl·m²",
+        textposition="outside",
+        hovertemplate="%{x}<br>Aporte: %{y:.1f} pl·m²<br>Porcentaje: %{customdata:.2f}%<extra></extra>",
+        customdata=df_contrib["% del total"].to_numpy(),
+        name="Aporte por estado"
+    ))
+    fig_bar.update_layout(
+        title="Aporte total por estado (pl·m²) — desde siembra",
+        xaxis_title="Estado fenológico (reglas por edad al PC)",
+        yaxis_title="Plantas·m² (acumulado)",
+        margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_bar, use_container_width=True)
+
+    # --- (2) Serie temporal apilada: contribución diaria por estado ---
+    # Cada traza toma sólo su máscara; fuera de la máscara aporta 0.
+    s1 = np.where(mask_S1 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
+    s2 = np.where(mask_S2 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
+    s3 = np.where(mask_S3 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
+    s4 = np.where(mask_S4 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
+
+    fig_area = go.Figure()
+    fig_area.add_trace(go.Scatter(x=ts, y=s1, name="S1 (FC=0.0)", mode="lines",
+                                  stackgroup="one",
+                                  hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S1: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
+    fig_area.add_trace(go.Scatter(x=ts, y=s2, name="S2 (FC=0.3)", mode="lines",
+                                  stackgroup="one",
+                                  hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S2: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
+    fig_area.add_trace(go.Scatter(x=ts, y=s3, name="S3 (FC=0.6)", mode="lines",
+                                  stackgroup="one",
+                                  hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S3: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
+    fig_area.add_trace(go.Scatter(x=ts, y=s4, name="S4 (FC=1.0)", mode="lines",
+                                  stackgroup="one",
+                                  hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S4: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
+    fig_area.update_layout(
+        title="Serie temporal apilada — Contribución diaria por estado (pl·m²·día⁻¹)",
+        xaxis_title="Fecha",
+        yaxis_title="pl·m²·día⁻¹ (ponderado por FC de estado)",
+        margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_area, use_container_width=True)
+
+    # --- (3) Tabla y descarga ---
+    st.markdown("**Totales** desde siembra (cap en x = tope A2):")
+    st.dataframe(df_contrib, use_container_width=True)
+    st.download_button(
+        "Descargar aportes por estado (CSV)",
+        df_contrib.to_csv(index=False).encode("utf-8"),
+        "aportes_por_estado.csv",
+        "text/csv",
+        key="dl_aportes_estados"
+    )
+
+
+
