@@ -666,21 +666,13 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
+loss_x_pct = float(perdida_rinde_pct(X_eff_pc)) if np.isfinite(X_eff_pc) else float("nan")
 
-def perdida_rinde_pct(x):
-    x = np.asarray(x, dtype=float)
-    return 0.375 * x / (1.0 + (0.375 * x / 76.639))
-
-loss_sup_pct  = float(perdida_rinde_pct(A2_sup_final))   if np.isfinite(A2_sup_final)   else float("nan")
-loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_final))  if np.isfinite(A2_ctrl_final)  else float("nan")
-loss_x_pct    = float(perdida_rinde_pct(X_eff_pc))       if np.isfinite(X_eff_pc)       else float("nan")
-
-st.subheader("Pérdida de rendimiento estimada (%) — con x = densidad×FC (edad en PC)")
+st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
 st.markdown(
     f"""
-**Sólo supresión (A2):** **{loss_sup_pct:,.2f}%**  |  A2 = {A2_sup_final:,.1f} pl·m²  
-**Supresión + control (A2):** **{loss_ctrl_pct:,.2f}%**  |  A2 = {A2_ctrl_final:,.1f} pl·m²  
-**Con fenología (x):** **{loss_x_pct:,.2f}%**  |  x = {X_eff_pc:,.1f} pl·m²  
+**Con fenología y manejo (x):** **{loss_x_pct:,.2f}%**  
+x = {X_eff_pc:,.1f} pl·m² (densidad efectiva desde siembra)
 """
 )
 
