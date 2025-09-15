@@ -664,7 +664,6 @@ st.markdown(
 **x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
-
 # ======================= Pérdida de rendimiento (%) ===================
 
 # Función: pérdida de rendimiento según densidad efectiva
@@ -673,25 +672,22 @@ def perdida_rinde_pct(x):
     return 0.375 * x / (1.0 + (0.375 * x / 76.639))
 
 # Densidad efectiva diaria
-emerrel_eff_x1 = df_plot["EMERREL"].values * FC_state                      # x₁: sin supresión ni control
-emerrel_eff_x2 = emerrel_eff_x1 * (1.0 - Ciec)                             # x₂: con supresión
-emerrel_eff_x3 = emerrel_eff_x2 * ctrl_factor                              # x₃: con supresión + control
+emerrel_eff_base = df_plot["EMERREL"].values * FC_state               # EMERREL × FC
+emerrel_eff_x2 = emerrel_eff_base * (1.0 - Ciec)                      # x₂: supresión
+emerrel_eff_x3 = emerrel_eff_x2 * ctrl_factor                         # x₃: supresión + control
 
 # Escala por AUC (plantas·m²·día⁻¹)
 if factor_area_to_plants is not None:
-    plm2dia_x1 = emerrel_eff_x1 * factor_area_to_plants
     plm2dia_x2 = emerrel_eff_x2 * factor_area_to_plants
     plm2dia_x3 = emerrel_eff_x3 * factor_area_to_plants
 
-    X1 = float(np.nansum(plm2dia_x1[mask_after_sow]))
     X2 = float(np.nansum(plm2dia_x2[mask_after_sow]))
     X3 = float(np.nansum(plm2dia_x3[mask_after_sow]))
 else:
-    plm2dia_x1 = plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_x1), np.nan)
-    X1 = X2 = X3 = float("nan")
+    plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_base), np.nan)
+    X2 = X3 = float("nan")
 
-# Pérdida de rendimiento para cada categoría
-loss_x1_pct = float(perdida_rinde_pct(X1)) if np.isfinite(X1) else float("nan")
+# Pérdida de rendimiento para x₂ y x₃
 loss_x2_pct = float(perdida_rinde_pct(X2)) if np.isfinite(X2) else float("nan")
 loss_x3_pct = float(perdida_rinde_pct(X3)) if np.isfinite(X3) else float("nan")
 
@@ -700,10 +696,7 @@ st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)
 
 st.markdown(
     f"""
-### x₁ — Sin supresión ni control  
-x = **{X1:,.1f}** pl·m² → pérdida estimada: **{loss_x1_pct:.2f}%**
-
-### x₂ — Con supresión, sin control  
+### x₂ — Con supresión (sin control)  
 x = **{X2:,.1f}** pl·m² → pérdida estimada: **{loss_x2_pct:.2f}%**
 
 ### x₃ — Con supresión + control  
@@ -721,15 +714,6 @@ fig_loss.add_trace(go.Scatter(
     x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida % vs x",
     hovertemplate="x = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
 ))
-
-if np.isfinite(X1):
-    fig_loss.add_trace(go.Scatter(
-        x=[X1], y=[loss_x1_pct], mode="markers+text",
-        name="x₁: sin supresión ni control",
-        text=[f"x₁ = {X1:.1f}"], textposition="top left",
-        marker=dict(size=10, symbol="circle"),
-        hovertemplate="x₁ = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
-    ))
 
 if np.isfinite(X2):
     fig_loss.add_trace(go.Scatter(
