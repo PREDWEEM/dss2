@@ -687,16 +687,6 @@ else:
     plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_base), np.nan)
     X2 = X3 = float("nan")
 
-# =================== x acumulado desde siembra (x₁, x₂, x₃) ===================
-if factor_area_to_plants is not None:
-    plm2dia_x1 = emerrel_eff_base * factor_area_to_plants  # x₁ = EMERREL × FC
-    x1_cum = np.cumsum(plm2dia_x1)
-    x2_cum = np.cumsum(plm2dia_x2)
-    x3_cum = np.cumsum(plm2dia_x3)
-else:
-    plm2dia_x1 = np.full(len(ts), np.nan)
-    x1_cum = x2_cum = x3_cum = np.full(len(ts), np.nan)
-
 # ================= Gráfico: Pérdida (%) vs x =================
 
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
