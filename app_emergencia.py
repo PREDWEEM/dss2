@@ -1,13 +1,14 @@
 # -*- coding: utf-8 -*-
-# app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d)
+# app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d) + Fenología (S1..S4)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI), con curva opcional
 # - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (elegible: 850/500/250/100 pl·m²)
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
-# - Pérdida de rinde calculada con A2 (topeado)
-# - Curva de A2 acumulado (integral corrida) vs tiempo
-# - Eje derecho: series instantáneas en pl·m²·día⁻¹ (escala por AUC) con dtick adaptativo
+# - Fenología (Avena fatua) con FC fijos: S1=0.0, S2=0.3, S3=0.6, S4=1.0
+#   Asignación por **edad al Periodo Crítico (PC)** con bordes: S2=7–27d; S3=28–59d; S4=≥60d; S1=resto
+# - x = ∫ (pl·m²·día⁻¹_ctrl × FC_estado_en_PC) dt, desde siembra
+# - Gráficos: EMERREL/Supresión/Control; A2 acumulado y x acumulado; Pérdida % vs A2/x
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -18,10 +19,10 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC)"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("AUC de EMERREL (cruda) ≙ tope A2 elegido (850/500/250/100 pl·m²). A2, pérdida de rinde y A2 acumulado usan esa escala. No se calcula ICIC.")
+st.caption("AUC de EMERREL (cruda) ≙ tope A2 (850/500/250/100 pl·m²). A2, x (fenología) y pérdidas usan esa escala. Sin ICIC.")
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10
@@ -32,7 +33,7 @@ def safe_nanmax(arr, fallback=0.0):
         if np.isfinite(val):
             return float(val)
         return float(fallback)
-    except ValueError:
+    except Exception:
         return float(fallback)
 
 def sniff_sep_dec(text: str):
@@ -79,21 +80,6 @@ def clean_numeric_series(s: pd.Series, decimal="."):
 def moving_average(x: pd.Series, win=5):
     return x.rolling(win, center=True, min_periods=1).mean()
 
-def percentiles_from_emerrel(emerrel: pd.Series, dates: pd.Series):
-    work = pd.DataFrame({"fecha": dates, "EMERREL": emerrel}).copy()
-    work["MA5"] = moving_average(work["EMERREL"], 5)
-    work["EMERAC"] = work["MA5"].cumsum()
-    total = float(work["EMERAC"].iloc[-1]) if len(work) else 0.0
-    if total <= 0:
-        work["EMERAC_N"] = 0.0
-        return {}, work, 0.0
-    work["EMERAC_N"] = work["EMERAC"] / total
-    def date_at(p):
-        idx = (work["EMERAC_N"] - p).abs().idxmin()
-        return pd.to_datetime(work.loc[idx, "fecha"])
-    P = {k: date_at(k/100.0) for k in [10,25,30,40,50,60,70,80]}
-    return P, work, total
-
 def _to_days(ts: pd.Series) -> np.ndarray:
     f = pd.to_datetime(ts)
     t = f.view("int64") / 1e9  # segundos
@@ -127,42 +113,6 @@ def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Seri
         dt_i = max(0.0, t[i] - t[i-1])
         out[i] = out[i-1] + 0.5 * (y_arr[i-1] + y_arr[i]) * dt_i
     return pd.Series(out, index=f)
-
-# ======================= Canopia (sin ICIC): FC y LAI =================
-def compute_canopy(
-    fechas: pd.Series,
-    sow_date: dt.date,
-    mode_canopy: str,
-    t_lag: int,
-    t_close: int,
-    cov_max: float,
-    lai_max: float,
-    k_beer: float,
-):
-    days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
-    def logistic_between(days, start, end, y_max):
-        if end <= start:
-            end = start + 1
-        t_mid = 0.5 * (start + end)
-        r = 4.0 / max(1.0, (end - start))
-        return y_max / (1.0 + np.exp(-r * (days - t_mid)))
-    if mode_canopy == "Cobertura dinámica (%)":
-        fc_dyn = np.where(
-            days_since_sow < t_lag, 0.0,
-            logistic_between(days_since_sow, t_lag, t_close, cov_max/100.0)
-        )
-        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
-        LAI = -np.log(np.clip(1.0 - fc_dyn, 1e-9, 1.0)) / max(1e-6, k_beer)
-        LAI = np.clip(LAI, 0.0, lai_max)
-    else:
-        LAI = np.where(
-            days_since_sow < t_lag, 0.0,
-            logistic_between(days_since_sow, t_lag, t_close, lai_max)
-        )
-        LAI = np.clip(LAI, 0.0, lai_max)
-        fc_dyn = 1 - np.exp(-k_beer * LAI)
-        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
-    return fc_dyn, LAI
 
 # ========================= Sidebar: datos base =========================
 with st.sidebar:
@@ -266,13 +216,19 @@ DTICK_RIGHT = {850: 170, 500: 100, 250: 50, 100: 20}.get(int(MAX_PLANTS_CAP), ma
 # ========================= Periodo crítico (PC) ========================
 with st.sidebar:
     st.header("Periodo crítico")
-    st.caption("Enfoque rápido de la ventana **11 de septiembre → 15 de noviembre** del año de referencia.")
-    use_pc = st.checkbox("Activar periodo crítico (11‑Sep → 15‑Nov)", value=False)
+    st.caption("Ventana **11 de septiembre → 15 de noviembre** del año de referencia (solo resalta, no recorta ejes).")
+    use_pc = st.checkbox("Resaltar periodo crítico", value=False)
+    ref_pc = st.selectbox("Referencia de edad para clasificación", ["Punto medio", "11-Sep", "15-Nov"], index=0)
 
-# Fecha de referencia para PC (mismo año que la siembra o, en su defecto, el predominante del dataset)
 year_pc = int(sow_date.year if sow_date else (years.mode().iloc[0] if len(years) else dt.date.today().year))
 PC_START = pd.to_datetime(f"{year_pc}-09-11")
 PC_END   = pd.to_datetime(f"{year_pc}-11-15")
+if ref_pc == "Punto medio":
+    PC_REF = PC_START + (PC_END - PC_START)/2
+elif ref_pc == "11-Sep":
+    PC_REF = PC_START
+else:
+    PC_REF = PC_END
 
 # =========== Etiquetas/visual + avanzadas =============================
 with st.sidebar:
@@ -299,15 +255,13 @@ else:
     Ciec = np.zeros_like(LAI, dtype=float)
 
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
-_, work_base, tot_base = percentiles_from_emerrel(df_plot["EMERREL"], df_plot["fecha"])
 
 # ===== Supresión (base agronómica) ===================================
+ts = pd.to_datetime(df_plot["fecha"])  # timestamps
 emerrel_supresion = (df_plot["EMERREL"].astype(float).values * (1.0 - Ciec)).clip(min=0.0)
 
 # ================== AUC y factor de equivalencia por ÁREA =============
-ts = pd.to_datetime(df_plot["fecha"])
 mask_after_sow = ts.dt.date >= sow_date
-
 auc_cruda = auc_time(ts, df_plot["EMERREL"].to_numpy(dtype=float), mask=mask_after_sow)  # (EMERREL)·día
 auc_sup   = auc_time(ts, emerrel_supresion, mask=mask_after_sow)
 
@@ -323,6 +277,7 @@ else:
 
 # =================== Manejo (control) y decaimientos ===================
 sched_rows = []
+
 def add_sched(nombre, fecha_ini, dias_res=None, nota=""):
     if not fecha_ini: return
     fin = (pd.to_datetime(fecha_ini) + pd.Timedelta(days=int(dias_res))).date() if dias_res else None
@@ -351,9 +306,11 @@ with st.sidebar:
 
 # Validaciones suaves
 warnings = []
+
 def check_pre(date_val, name):
     if date_val and date_val > sow_date:
         warnings.append(f"{name}: debería ser ≤ fecha de siembra ({sow_date}).")
+
 def check_post(date_val, name):
     if date_val and date_val < sow_date:
         warnings.append(f"{name}: debería ser ≥ fecha de siembra ({sow_date}).")
@@ -364,11 +321,10 @@ if post_gram:  check_post(post_gram_date, "Graminicida (post)")
 if post_selR:  check_post(post_selR_date, "Selectivo + residual (post)")
 for w in warnings: st.warning(w)
 
-# Agendar
+# Agendar (cronograma visual)
 if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Barbecho")
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
-# Post graminicida: mostrar ventana hacia atrás en cronograma
 if post_gram:
     back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_DAYS_DEFAULT-1)).date()
     sched_rows.append({"Intervención": "Post · graminicida selectivo (NR, −10d)", "Inicio": str(back_ini), "Fin": str(post_gram_date), "Nota": f"Ventana hacia atrás {NR_DAYS_DEFAULT}d"})
@@ -388,8 +344,6 @@ with st.sidebar:
 with st.sidebar:
     st.header("Decaimiento en residuales")
     decaimiento_tipo = st.selectbox("Tipo de decaimiento", ["Ninguno", "Lineal", "Exponencial"], index=0)
-    if decaimiento_tipo == "Lineal":
-        st.caption("Peso(t)=1 al inicio → 0 al final; e(t)=eficiencia×Peso(t)")
     if decaimiento_tipo == "Exponencial":
         half_life = st.number_input("Semivida (días) para exponencial", 1, 120, 20, 1)
         lam_exp = math.log(2) / max(1e-6, half_life)
@@ -427,21 +381,20 @@ def weights_residual(start_date, dias):
     return w
 
 def weights_backward(center_date, dias):
-    """
-    Ventana HACIA ATRÁS de longitud 'dias' que incluye el día de aplicación.
-    Ej.: dias=10 → afecta [aplicación-9, …, aplicación].
-    """
+    """Ventana hacia atrás de longitud 'dias' que incluye el día de aplicación.
+       Ej.: dias=10 → afecta [aplicación-9, …, aplicación]."""
     w = np.zeros_like(fechas_d, dtype=float)
     if (not center_date) or (not dias) or (int(dias) <= 0):
         return w
     d_center = center_date
     d0 = d_center - timedelta(days=int(dias)-1)
-    d1 = d_center + timedelta(days=1)  # límite superior exclusivo
+    d1 = d_center + timedelta(days=1)
     mask = (fechas_d >= d0) & (fechas_d < d1)
     w[mask] = 1.0
     return w
 
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
+
 def apply_efficiency(weights, eff_pct):
     if eff_pct <= 0:
         return
@@ -452,7 +405,6 @@ def apply_efficiency(weights, eff_pct):
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
-# Graminicida post: ventana hacia atrás 10 días
 if post_gram: apply_efficiency(weights_backward(post_gram_date, NR_DAYS_DEFAULT), ef_post_gram)
 if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), ef_post_selR)
 
@@ -481,7 +433,32 @@ else:
     plantas_supresion      = np.full(len(df_plot), np.nan)
     plantas_supresion_ctrl = np.full(len(df_plot), np.nan)
 
-# =========== Curvas A2 acumulado (integral corrida desde siembra) =====
+# ===================== Fenología S1..S4 (FC fijos) ====================
+with st.sidebar:
+    st.header("Fenología de la maleza (Avena fatua)")
+    st.caption("FC fijos por estado: S1=0.0, S2=0.3, S3=0.6, S4=1.0. Asignación por edad al PC.")
+
+fechas_series = ts.dt.date.values
+age_at_pc = np.array([(PC_REF.date() - d).days for d in fechas_series], dtype=float)
+mask_S2 = (age_at_pc >= 7)  & (age_at_pc <= 27)
+mask_S3 = (age_at_pc >= 28) & (age_at_pc <= 59)
+mask_S4 = (age_at_pc >= 60)
+mask_S1 = ~(mask_S2 | mask_S3 | mask_S4)
+
+FC_state = np.zeros_like(age_at_pc, dtype=float)  # S1=0.0
+FC_state[mask_S2] = 0.3
+FC_state[mask_S3] = 0.6
+FC_state[mask_S4] = 1.0
+
+# Densidad efectiva diaria ponderada por estado (según edad al PC)
+if factor_area_to_plants is not None:
+    plm2dia_ctrl_eff = plantas_supresion_ctrl * FC_state
+    X_eff_pc = float(np.nansum(plm2dia_ctrl_eff[mask_after_sow]))
+else:
+    plm2dia_ctrl_eff = np.full(len(ts), np.nan)
+    X_eff_pc = float("nan")
+
+# =========== Curvas acumuladas (A2 y x) ==========
 if factor_area_to_plants is not None:
     auc_cum_sup  = cumulative_auc_series(ts, emerrel_supresion, mask=mask_after_sow)
     auc_cum_ctrl = cumulative_auc_series(ts, emerrel_supresion_ctrl, mask=mask_after_sow)
@@ -489,21 +466,22 @@ if factor_area_to_plants is not None:
     A2_cum_ctrl  = auc_cum_ctrl * factor_area_to_plants
     A2_cum_sup_cap  = A2_cum_sup.clip(upper=MAX_PLANTS_CAP)
     A2_cum_ctrl_cap = A2_cum_ctrl.clip(upper=MAX_PLANTS_CAP)
+    X_cum_eff = np.cumsum(plm2dia_ctrl_eff)
+    X_cum_eff_cap = np.clip(X_cum_eff, None, MAX_PLANTS_CAP)
 else:
     A2_cum_sup_cap = pd.Series(dtype=float)
     A2_cum_ctrl_cap = pd.Series(dtype=float)
+    X_cum_eff_cap = np.array([])
 
 # ============================== Gráfico 1 ==============================
 fig = go.Figure()
 
-# EMERREL cruda (informativa)
 fig.add_trace(go.Scatter(
     x=ts, y=df_plot["EMERREL"], mode="lines",
     name="EMERREL (cruda)",
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>EMERREL: %{y:.4f}<extra></extra>"
 ))
 
-# Supresión base
 fig.add_trace(go.Scatter(
     x=ts, y=emerrel_supresion, mode="lines",
     name="EMERREL × (1 − Ciec)", line=dict(dash="dashdot"),
@@ -511,7 +489,6 @@ fig.add_trace(go.Scatter(
     hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Supresión: %{y:.4f}<br>pl·m²·día⁻¹ (sup.): %{customdata[0]:.2f}<extra></extra>"
 ))
 
-# Supresión + control
 fig.add_trace(go.Scatter(
     x=ts, y=emerrel_supresion_ctrl, mode="lines",
     name="EMERREL × (1 − Ciec) (control)", line=dict(dash="dot", width=2),
@@ -520,6 +497,7 @@ fig.add_trace(go.Scatter(
 ))
 
 # Bandas de manejo (pre/post)
+
 def _add_label(center_ts, text, bgcolor, y=0.94):
     fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
         text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
@@ -551,12 +529,18 @@ if show_nonres_bands:
     if pre_glifo: add_one_day_band(pre_glifo_date, "Glifo (1d)")
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
     if post_gram:
-        # Banda hacia atrás para el graminicida post
         x_app = pd.to_datetime(post_gram_date)
         x0 = x_app - pd.Timedelta(days=NR_DAYS_DEFAULT-1)
         x1 = x_app + pd.Timedelta(days=1)
         fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.25)
         _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_DAYS_DEFAULT}d)", "rgba(144,238,144,0.85)")
+
+# Resaltar Periodo Crítico
+if use_pc:
+    fig.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
+    fig.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.04, xref="x", yref="paper",
+                       text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
+                       bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
 
 # Ejes y escalas
 ymax = max(
@@ -576,7 +560,7 @@ layout_kwargs = dict(
     yaxis=dict(range=[0, ymax])
 )
 
-# ========= Eje derecho opcional: Plantas·m²·día⁻¹ (escala por AUC) =====
+# Eje derecho opcional: Plantas·m²·día⁻¹ (escala por AUC)
 if show_plants_axis and (factor_area_to_plants is not None) and np.isfinite(factor_area_to_plants):
     candidatos = [
         safe_nanmax(plantas_supresion, MAX_PLANTS_CAP),
@@ -623,106 +607,116 @@ if use_ciec and show_ciec_curve:
 
 fig.update_layout(**layout_kwargs)
 
-# === Enfoque de periodo crítico (si está activado) ===
-if 'use_pc' in globals() and use_pc:
-    try:
-        fig.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
-        fig.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.04, xref="x", yref="paper",
-                           text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
-                           bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
-        
-    except Exception:
-        pass
-
 st.plotly_chart(fig, use_container_width=True)
 st.caption(conv_caption + f" · A2 (por AUC) con tope = {MAX_PLANTS_CAP:.0f} pl·m².")
 
-# ======================= A2 en UI (AUC con tope) ======================
+# ======================= A2 / x en UI ======================
 st.subheader("Plantas·m² que escapan — Área bajo la curva (AUC) con tope")
 st.markdown(
     f"""
 **A2 — Solo supresión (1−Ciec):** **{A2_sup_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
-**A2 — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
+**A2 — Supresión + control post:** **{A2_ctrl_final:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_  
+**x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
-def perdida_rinde_pct(A2):
-    A2 = np.asarray(A2, dtype=float)
-    return 0.375 * A2 / (1.0 + (0.375 * A2 / 76.639))
 
-loss_sup_pct  = float(perdida_rinde_pct(A2_sup_final))  if np.isfinite(A2_sup_final)  else float("nan")
-loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_final)) if np.isfinite(A2_ctrl_final) else float("nan")
+def perdida_rinde_pct(x):
+    x = np.asarray(x, dtype=float)
+    return 0.375 * x / (1.0 + (0.375 * x / 76.639))
 
-st.subheader("Pérdida de rendimiento estimada (%)")
+loss_sup_pct  = float(perdida_rinde_pct(A2_sup_final))   if np.isfinite(A2_sup_final)   else float("nan")
+loss_ctrl_pct = float(perdida_rinde_pct(A2_ctrl_final))  if np.isfinite(A2_ctrl_final)  else float("nan")
+loss_x_pct    = float(perdida_rinde_pct(X_eff_pc))       if np.isfinite(X_eff_pc)       else float("nan")
+
+st.subheader("Pérdida de rendimiento estimada (%) — con x = densidad×FC (edad en PC)")
 st.markdown(
     f"""
-**Sólo supresión (1−Ciec):** **{loss_sup_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_sup_final:,.1f} pl·m²  
-**Supresión + control post:** **{loss_ctrl_pct:,.2f}%**  &nbsp;|&nbsp;  A2 = {A2_ctrl_final:,.1f} pl·m²
+**Sólo supresión (A2):** **{loss_sup_pct:,.2f}%**  |  A2 = {A2_sup_final:,.1f} pl·m²  
+**Supresión + control (A2):** **{loss_ctrl_pct:,.2f}%**  |  A2 = {A2_ctrl_final:,.1f} pl·m²  
+**Con fenología (x):** **{loss_x_pct:,.2f}%**  |  x = {X_eff_pc:,.1f} pl·m²  
 """
 )
 
-# ============== Gráfico: A2 acumulado (integral corrida) ===============
-st.subheader("A2 acumulado (pl·m²) desde siembra")
+# ============== Gráfico: A2 y x acumulado (integral corrida) ===============
+st.subheader("Acumulados desde siembra (pl·m²)")
 fig_a2 = go.Figure()
-if len(A2_cum_sup_cap) and len(A2_cum_ctrl_cap):
+
+if len(A2_cum_sup_cap):
     fig_a2.add_trace(go.Scatter(
         x=A2_cum_sup_cap.index, y=A2_cum_sup_cap.values, mode="lines",
         name="A2 acum — Supresión",
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (sup): %{y:.1f} pl·m²<extra></extra>"
     ))
+if len(A2_cum_ctrl_cap):
     fig_a2.add_trace(go.Scatter(
         x=A2_cum_ctrl_cap.index, y=A2_cum_ctrl_cap.values, mode="lines",
         name="A2 acum — Supresión + control",
         line=dict(dash="dot"),
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>A2 acum (ctrl): %{y:.1f} pl·m²<extra></extra>"
     ))
-    fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash",
-                     annotation_text=f"Tope {MAX_PLANTS_CAP:.0f}", annotation_position="top left")
+if len(X_cum_eff_cap):
+    fig_a2.add_trace(go.Scatter(
+        x=ts, y=X_cum_eff_cap, mode="lines",
+        name="x acum — (clasificación en PC)",
+        line=dict(dash="dash"),
+        hovertemplate="Fecha: %{x|%Y-%m-%d}<br>x acum: %{y:.1f} pl·m²<extra></extra>"
+    ))
+
+fig_a2.add_hline(y=MAX_PLANTS_CAP, line_width=1, line_dash="dash",
+                 annotation_text=f"Tope {MAX_PLANTS_CAP:.0f}", annotation_position="top left")
+
+if len(A2_cum_sup_cap):
     fig_a2.add_trace(go.Scatter(
         x=[A2_cum_sup_cap.index[-1]], y=[A2_cum_sup_cap.values[-1]], mode="markers+text",
         name="Final supresión", text=[f"{A2_cum_sup_cap.values[-1]:.1f}"], textposition="top center"
     ))
+if len(A2_cum_ctrl_cap):
     fig_a2.add_trace(go.Scatter(
         x=[A2_cum_ctrl_cap.index[-1]], y=[A2_cum_ctrl_cap.values[-1]], mode="markers+text",
         name="Final supresión+control", text=[f"{A2_cum_ctrl_cap.values[-1]:.1f}"], textposition="bottom center"
     ))
+if len(X_cum_eff_cap):
+    fig_a2.add_trace(go.Scatter(
+        x=[ts.iloc[-1]], y=[X_cum_eff_cap[-1]], mode="markers+text",
+        name="Final x (fenología)", text=[f"{X_cum_eff_cap[-1]:.1f}"], textposition="middle right"
+    ))
 
-# === Enfoque de periodo crítico en A2 (si está activado) ===
-if 'use_pc' in globals() and use_pc:
-    try:
-        fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
-        fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
-                              text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
-                              bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
-        
-    except Exception:
-        pass
+if use_pc:
+    fig_a2.add_vrect(x0=PC_START, x1=PC_END, line_width=0, fillcolor="MediumPurple", opacity=0.12)
+    fig_a2.add_annotation(x=PC_START + (PC_END-PC_START)/2, y=1.02, xref="x", yref="paper",
+                          text="Periodo crítico", showarrow=False, bgcolor="rgba(147,112,219,0.85)",
+                          bordercolor="rgba(0,0,0,0.2)", borderwidth=1, borderpad=2)
 
 fig_a2.update_layout(
-    title=f"A2 acumulado (pl·m²) por integración temporal (cap {MAX_PLANTS_CAP:.0f})",
+    title=f"Acumulados (A2 y x) por integración temporal (cap {MAX_PLANTS_CAP:.0f})",
     xaxis_title="Fecha",
-    yaxis_title="A2 acumulado (pl·m²)",
+    yaxis_title="pl·m² acumulado",
     margin=dict(l=10, r=10, t=40, b=10)
 )
 st.plotly_chart(fig_a2, use_container_width=True)
 
-# ============== Gráfico: Pérdida (%) vs A2 (pl·m²) ====================
+# ============== Gráfico: Pérdida (%) vs A2/x (pl·m²) ====================
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
 fig_loss = go.Figure()
-fig_loss.add_trace(go.Scatter(x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida %"))
+fig_loss.add_trace(go.Scatter(x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida % (con x/A2)"))
 if np.isfinite(A2_sup_final):
     fig_loss.add_trace(go.Scatter(x=[A2_sup_final], y=[loss_sup_pct], mode="markers+text",
-                                  name="Solo supresión", text=["Supresión"], textposition="top center",
+                                  name="Sólo supresión (A2)", text=["A2 (supresión)"], textposition="top center",
                                   marker=dict(size=10, symbol="circle")))
 if np.isfinite(A2_ctrl_final):
     fig_loss.add_trace(go.Scatter(x=[A2_ctrl_final], y=[loss_ctrl_pct], mode="markers+text",
-                                  name="Supresión + control", text=["Supresión+control"], textposition="bottom center",
+                                  name="Supresión + control (A2)", text=["A2 (ctrl)"], textposition="bottom center",
                                   marker=dict(size=10, symbol="diamond")))
+if np.isfinite(X_eff_pc):
+    fig_loss.add_trace(go.Scatter(x=[X_eff_pc], y=[perdida_rinde_pct(X_eff_pc)], mode="markers+text",
+                                  name="Fenología (x)", text=["x (FC en PC)"], textposition="middle right",
+                                  marker=dict(size=11, symbol="star")))
 fig_loss.update_layout(
-    title=f"Pérdida de rendimiento (%) vs. A2 (pl·m²) — escala por AUC (cap {MAX_PLANTS_CAP:.0f})",
-    xaxis_title=f"A2 (pl·m²) — área bajo la curva (tope {MAX_PLANTS_CAP:.0f})",
+    title=f"Pérdida de rendimiento (%) vs. A2/x (pl·m²) — escala por AUC (cap {MAX_PLANTS_CAP:.0f})",
+    xaxis_title=f"A2 / x (pl·m²) — área bajo la curva (tope {MAX_PLANTS_CAP:.0f})",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
 )
@@ -746,53 +740,63 @@ if factor_area_to_plants is not None:
     out["plm2dia_cruda"]             = np.round(plantas_emerrel_cruda, 4)
     out["plm2dia_supresion"]         = np.round(plantas_supresion, 4)
     out["plm2dia_supresion_ctrl"]    = np.round(plantas_supresion_ctrl, 4)
+    out["plm2dia_supresion_ctrl_eff"] = np.round(plm2dia_ctrl_eff, 4)
     a2cum_df = pd.DataFrame({
-        "fecha": pd.to_datetime(A2_cum_sup_cap.index),
-        "A2_acum_sup_cap": A2_cum_sup_cap.values,
-        "A2_acum_sup_ctrl_cap": A2_cum_ctrl_cap.values
+        "fecha": pd.to_datetime(ts),
+        "A2_acum_sup_cap": A2_cum_sup_cap.reindex(ts, method="nearest").values if len(A2_cum_sup_cap) else np.nan,
+        "A2_acum_sup_ctrl_cap": A2_cum_ctrl_cap.reindex(ts, method="nearest").values if len(A2_cum_ctrl_cap) else np.nan,
+        "x_acum_eff_cap": X_cum_eff_cap if len(X_cum_eff_cap) else np.nan,
     })
 else:
-    a2cum_df = pd.DataFrame(columns=["fecha","A2_acum_sup_cap","A2_acum_sup_ctrl_cap"])
+    a2cum_df = pd.DataFrame(columns=["fecha","A2_acum_sup_cap","A2_acum_sup_ctrl_cap","x_acum_eff_cap"])
 
 with st.expander("Descargas de series", expanded=True):
-    st.caption(conv_caption + f" · Columnas en pl·m²·día⁻¹ (escala por AUC) y A2 acumulado (cap {MAX_PLANTS_CAP:.0f}).")
+    st.caption(conv_caption + f" · Columnas en pl·m²·día⁻¹ (escala por AUC) y acumulados (cap {MAX_PLANTS_CAP:.0f}).")
     cols_show = ["fecha","EMERREL_cruda","EMERREL_supresion","EMERREL_supresion_ctrl"]
     if factor_area_to_plants is not None:
-        cols_show += ["plm2dia_cruda","plm2dia_supresion","plm2dia_supresion_ctrl"]
+        cols_show += ["plm2dia_cruda","plm2dia_supresion","plm2dia_supresion_ctrl","plm2dia_supresion_ctrl_eff"]
     out_show = out[cols_show].copy()
     st.dataframe(out_show.tail(20), use_container_width=True)
     st.download_button("Descargar serie procesada (CSV)",
                        out_show.to_csv(index=False).encode("utf-8"),
-                       "serie_procesada_auc.csv", "text/csv", key="dl_serie")
+                       "serie_procesada_auc_fenologia.csv", "text/csv", key="dl_serie")
     if len(a2cum_df):
-        st.download_button("Descargar A2 acumulado (CSV)",
+        st.download_button("Descargar acumulados (CSV)",
                            a2cum_df.to_csv(index=False).encode("utf-8"),
-                           "A2_acumulado.csv", "text/csv", key="dl_a2cum")
+                           "acumulados_a2_x.csv", "text/csv", key="dl_a2cum")
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
-diag = {
+if factor_area_to_plants is not None:
+    contrib_S1 = float(np.nansum(plantas_supresion_ctrl[mask_S1 & mask_after_sow]))
+    contrib_S2 = float(np.nansum(plantas_supresion_ctrl[mask_S2 & mask_after_sow]))
+    contrib_S3 = float(np.nansum(plantas_supresion_ctrl[mask_S3 & mask_after_sow]))
+    contrib_S4 = float(np.nansum(plantas_supresion_ctrl[mask_S4 & mask_after_sow]))
+else:
+    contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
+
+_diag = {
     "siembra": str(sow_date),
     "tope_A2_plm2": MAX_PLANTS_CAP,
+    "PC": {"start": str(PC_START.date()), "end": str(PC_END.date()), "ref": ref_pc},
     # AUCs
     "AUC_EMERREL_cruda_desde_siembra_dias": float(auc_cruda),
     "AUC_supresion_desde_siembra_dias": float(auc_sup),
     "AUC_supresion_ctrl_desde_siembra_dias": float(auc_sup_ctrl),
     # Escala por área
     "factor_pl_m2_por_EMERREL_dia": float(factor_area_to_plants) if (factor_area_to_plants is not None) else None,
-    # A2
+    # A2/x
     "A2_sup_raw_por_AUC": float(A2_sup_raw) if np.isfinite(A2_sup_raw) else None,
     "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else None,
     "A2_sup_cap": float(A2_sup_final) if np.isfinite(A2_sup_final) else None,
     "A2_ctrl_cap": float(A2_ctrl_final) if np.isfinite(A2_ctrl_final) else None,
-    # A2 acumulado (últimos)
-    "A2_cum_sup_cap_final": float(A2_cum_sup_cap.values[-1]) if len(A2_cum_sup_cap) else None,
-    "A2_cum_ctrl_cap_final": float(A2_cum_ctrl_cap.values[-1]) if len(A2_cum_ctrl_cap) else None,
-    # Ciec
-    "LAIhc": float(LAIhc),
-    "Ciec_min_max": (float(np.nanmin(Ciec)), float(np.nanmax(Ciec))) if len(Ciec) else None,
+    "X_eff_pc": float(X_eff_pc) if np.isfinite(X_eff_pc) else None,
+    # Fenología por edad en PC
+    "reglas_fenologia_por_edad_PC": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
+    "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
+    "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
     # Manejo
     "decaimiento": decaimiento_tipo,
     "NR_no_residuales_dias": NR_DAYS_DEFAULT
 }
-st.code(json.dumps(diag, ensure_ascii=False, indent=2))
+st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
