@@ -737,23 +737,25 @@ st.plotly_chart(fig_a2, use_container_width=True)
 # ============== Gráfico: Pérdida (%) vs A2/x (pl·m²) ====================
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
+
 fig_loss = go.Figure()
-fig_loss.add_trace(go.Scatter(x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida % (con x/A2)"))
-if np.isfinite(A2_sup_final):
-    fig_loss.add_trace(go.Scatter(x=[A2_sup_final], y=[loss_sup_pct], mode="markers+text",
-                                  name="Sólo supresión (A2)", text=["A2 (supresión)"], textposition="top center",
-                                  marker=dict(size=10, symbol="circle")))
-if np.isfinite(A2_ctrl_final):
-    fig_loss.add_trace(go.Scatter(x=[A2_ctrl_final], y=[loss_ctrl_pct], mode="markers+text",
-                                  name="Supresión + control (A2)", text=["A2 (ctrl)"], textposition="bottom center",
-                                  marker=dict(size=10, symbol="diamond")))
+fig_loss.add_trace(go.Scatter(
+    x=x_curve, y=y_curve, mode="lines", name="Modelo pérdida % vs x",
+    hovertemplate="x = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
+))
+
 if np.isfinite(X_eff_pc):
-    fig_loss.add_trace(go.Scatter(x=[X_eff_pc], y=[perdida_rinde_pct(X_eff_pc)], mode="markers+text",
-                                  name="Fenología (x)", text=["x (FC en PC)"], textposition="middle right",
-                                  marker=dict(size=11, symbol="star")))
+    fig_loss.add_trace(go.Scatter(
+        x=[X_eff_pc], y=[loss_x_pct], mode="markers+text",
+        name="x (densidad efectiva)",
+        text=[f"x = {X_eff_pc:.1f}"], textposition="top center",
+        marker=dict(size=10, symbol="star"),
+        hovertemplate="x = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
+    ))
+
 fig_loss.update_layout(
-    title=f"Pérdida de rendimiento (%) vs. A2/x (pl·m²) — escala por AUC (cap {MAX_PLANTS_CAP:.0f})",
-    xaxis_title=f"A2 / x (pl·m²) — área bajo la curva (tope {MAX_PLANTS_CAP:.0f})",
+    title=f"Pérdida de rendimiento (%) vs. x (densidad efectiva)",
+    xaxis_title=f"x (pl·m²) — área bajo la curva desde siembra",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
 )
