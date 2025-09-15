@@ -114,6 +114,51 @@ def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Seri
         out[i] = out[i-1] + 0.5 * (y_arr[i-1] + y_arr[i]) * dt_i
     return pd.Series(out, index=f)
 
+# ======================= Canopia (sin ICIC): FC y LAI =================
+# (requerida por compute_canopy -> FC/LAI y Ciec)
+
+def compute_canopy(
+    fechas: pd.Series,
+    sow_date: dt.date,
+    mode_canopy: str,
+    t_lag: int,
+    t_close: int,
+    cov_max: float,
+    lai_max: float,
+    k_beer: float,
+):
+    """Devuelve (FC, LAI) estimados para el cultivo.
+    - Si mode_canopy == "Cobertura dinámica (%)": crece FC con logística de t_lag a t_close (cap cov_max),
+      y se deriva LAI por Beer–Lambert.
+    - Caso contrario: crece LAI con logística (cap lai_max) y se proyecta FC por Beer–Lambert.
+    """
+    days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
+
+    def logistic_between(days, start, end, y_max):
+        if end <= start:
+            end = start + 1
+        t_mid = 0.5 * (start + end)
+        r = 4.0 / max(1.0, (end - start))
+        return y_max / (1.0 + np.exp(-r * (days - t_mid)))
+
+    if mode_canopy == "Cobertura dinámica (%)":
+        fc_dyn = np.where(
+            days_since_sow < t_lag, 0.0,
+            logistic_between(days_since_sow, t_lag, t_close, cov_max/100.0)
+        )
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
+        LAI = -np.log(np.clip(1.0 - fc_dyn, 1e-9, 1.0)) / max(1e-6, k_beer)
+        LAI = np.clip(LAI, 0.0, lai_max)
+    else:
+        LAI = np.where(
+            days_since_sow < t_lag, 0.0,
+            logistic_between(days_since_sow, t_lag, t_close, lai_max)
+        )
+        LAI = np.clip(LAI, 0.0, lai_max)
+        fc_dyn = 1 - np.exp(-k_beer * LAI)
+        fc_dyn = np.clip(fc_dyn, 0.0, 1.0)
+    return fc_dyn, LAI
+
 # ========================= Sidebar: datos base =========================
 with st.sidebar:
     st.header("Datos de entrada")
