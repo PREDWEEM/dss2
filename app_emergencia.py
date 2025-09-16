@@ -11,7 +11,8 @@
 # - Gráficos: EMERREL/Supresión/Control; A2 acumulado y x acumulado; Pérdida % vs A2/x
 # - Notas:
 #   · NR no residuales por defecto = 10d
-#   · Graminicida post = día de aplicación + 10 días hacia adelante (11 días en total), limitando el control a S1–S3
+#   · Graminicida post = día de aplicación + 10 días hacia adelante (11 días totales), controlando **solo S1–S3**
+#   · Se corrige para que la reducción del graminicida se **vea en la curva** EMERREL×(1−Ciec) (control)
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -67,7 +68,6 @@ def parse_csv(raw, sep_opt, dec_opt, encoding="utf-8", on_bad="warn"):
     sep_guess, dec_guess = sniff_sep_dec(head)
     sep = sep_guess if sep_opt == "auto" else ("," if sep_opt=="," else (";" if sep_opt==";" else "\t"))
     dec = dec_guess if dec_opt == "auto" else dec_opt
-    # Leer desde bytes; dejamos que pandas maneje encoding internamente
     df = pd.read_csv(io.BytesIO(raw), sep=sep, decimal=dec, engine="python", on_bad_lines=on_bad)
     return df, {"sep": sep, "dec": dec, "enc": encoding}
 
@@ -411,7 +411,6 @@ with st.sidebar:
         lam_exp = math.log(2) / max(1e-6, half_life)
     else:
         lam_exp = None
-# Sanitizar lam_exp si no corresponde
 if decaimiento_tipo != "Exponencial":
     lam_exp = None
 
@@ -444,11 +443,8 @@ def weights_residual(start_date, dias):
         w[idxs] = np.exp(-lam_exp * t_rel) if lam_exp is not None else 1.0
     return w
 
-# Dos factores:
-#  - ctrl_factor: para intervenciones globales
-#  - ctrl_factor_state: para intervenciones limitadas a ciertos estados (S1–S3)
+# Factor de control global (todas las intervenciones impactan aquí)
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
-ctrl_factor_state = np.ones_like(fechas_d, dtype=float)
 
 def apply_efficiency(weights, eff_pct):
     """Aplica reducción 'eff_pct' sobre ctrl_factor (global)."""
@@ -458,28 +454,25 @@ def apply_efficiency(weights, eff_pct):
     reduc = np.clip(1.0 - (eff_pct/100.0) * w, 0.0, 1.0)
     np.multiply(ctrl_factor, reduc, out=ctrl_factor)
 
-def apply_efficiency_masked(weights, eff_pct, state_mask):
-    """Aplica reducción sólo donde 'state_mask' es True (sobre ctrl_factor_state)."""
-    if eff_pct <= 0:
-        return
-    w = np.clip(weights, 0.0, 1.0) * state_mask.astype(float)
-    reduc = np.clip(1.0 - (eff_pct/100.0) * w, 0.0, 1.0)
-    np.multiply(ctrl_factor_state, reduc, out=ctrl_factor_state)
-
 # Aplicar cada intervención
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
-# Graminicida post: día 0 + 10 días hacia adelante, limitado a S1–S3
+
+# 🔶 Graminicida post: día 0 + 10 días hacia adelante, SOLO S1–S3 → efecto visible en la curva control
 if post_gram:
-    w_fwd = weights_residual(post_gram_date, POST_GRAM_FORWARD_DAYS)
-    mask_gram_estados = (mask_S1 | mask_S2 | mask_S3)
-    apply_efficiency_masked(w_fwd, ef_post_gram, mask_gram_estados)
+    w_fwd = weights_residual(post_gram_date, POST_GRAM_FORWARD_DAYS)              # ventana temporal
+    mask_gram_estados = (mask_S1 | mask_S2 | mask_S3).astype(float)               # máscara por estado
+    w_masked = w_fwd * mask_gram_estados                                         # limitar a S1–S3
+    reduc = np.clip(1.0 - (ef_post_gram/100.0) * w_masked, 0.0, 1.0)             # reducción local
+    np.multiply(ctrl_factor, reduc, out=ctrl_factor)                              # aplica al factor global
+
 if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), ef_post_selR)
 
 # ==================== Control sobre SUPRESIÓN ==========================
-# Combina el control global + el limitado por estado (graminicida S1–S3)
-emerrel_supresion_ctrl = emerrel_supresion * ctrl_factor * ctrl_factor_state
+# IMPORTANTE: ahora el efecto del graminicida (limitado a S1–S3) ya está embebido en ctrl_factor,
+# por lo que se verá directamente en esta curva:
+emerrel_supresion_ctrl = emerrel_supresion * ctrl_factor
 
 # ========================= A2 por AUC (área) ===========================
 auc_sup_ctrl = auc_time(ts, emerrel_supresion_ctrl, mask=mask_after_sow)
@@ -666,7 +659,7 @@ st.caption(conv_caption + f" · A2 (por AUC) con tope = {MAX_PLANTS_CAP:.0f} pl�
 # ======================= A2 / x en UI ======================
 # Densidad efectiva diaria ponderada por estado (según edad al PC)
 if factor_area_to_plants is not None:
-    X_eff_pc = float(np.nansum(plm2dia_ctrl_eff[mask_after_sow]))
+    X_eff_pc = float(np.nansum((plantas_supresion_ctrl * FC_state)[mask_after_sow]))
 else:
     X_eff_pc = float("nan")
 
@@ -681,7 +674,7 @@ def perdida_rinde_pct(x):
 # Densidad efectiva diaria para dos situaciones (informativo)
 emerrel_eff_base = df_plot["EMERREL"].values * FC_state               # EMERREL × FC
 emerrel_eff_x2 = emerrel_eff_base * (1.0 - Ciec)                      # x₂: supresión
-emerrel_eff_x3 = emerrel_eff_x2 * (ctrl_factor * ctrl_factor_state)   # x₃: supresión + control (incluye S1–S3 en gram.)
+emerrel_eff_x3 = emerrel_eff_x2 * ctrl_factor                         # x₃: supresión + control (incluye gram S1–S3)
 
 # Escala por AUC (plantas·m²·día⁻¹)
 if factor_area_to_plants is not None:
@@ -763,9 +756,8 @@ with st.expander("Descargas de series", expanded=True):
         out["plm2dia_cruda"]              = np.round(plantas_emerrel_cruda, 4)
         out["plm2dia_supresion"]          = np.round(plantas_supresion, 4)
         out["plm2dia_supresion_ctrl"]     = np.round(plantas_supresion_ctrl, 4)
-        out["plm2dia_supresion_ctrl_eff"] = np.round(plm2dia_ctrl_eff, 4)
+        out["plm2dia_supresion_ctrl_eff"] = np.round(plantas_supresion_ctrl * FC_state, 4)
 
-        # Reindex seguro de acumulados
         if factor_area_to_plants is not None and len(ts):
             a2cum_df = pd.DataFrame({"fecha": pd.to_datetime(ts)})
             if len(A2_cum_sup_cap):
@@ -916,4 +908,3 @@ else:
         "text/csv",
         key="dl_aportes_estados"
     )
-
