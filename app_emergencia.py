@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-# app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR=10d) + Fenología (S1..S4)
+# app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (NR) + Fenología (S1..S4)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI), con curva opcional
 # - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (elegible: 850/500/250/100 pl·m²)
@@ -9,6 +9,7 @@
 #   Asignación por **edad al Periodo Crítico (PC)** con bordes: S2=7–27d; S3=28–59d; S4=≥60d; S1=resto
 # - x = ∫ (pl·m²·día⁻¹_ctrl × FC_estado_en_PC) dt, desde siembra
 # - Gráficos: EMERREL/Supresión/Control; A2 acumulado y x acumulado; Pérdida % vs A2/x
+# - Nota: NR no residuales por defecto = 10d; **graminicida post = 14d** (ventana hacia atrás)
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -25,7 +26,8 @@ st.title(APP_TITLE)
 st.caption("AUC de EMERREL (cruda) ≙ tope A2 (850/500/250/100 pl·m²). A2, x (fenología) y pérdidas usan esa escala. Sin ICIC.")
 
 # ========================== Constantes y helpers ==========================
-NR_DAYS_DEFAULT = 10
+NR_DAYS_DEFAULT = 10           # Ventanas NR por defecto (p.ej., selectivos NR)
+NR_POST_GRAM_DAYS = 14         # Ventana hacia atrás específica para graminicida post
 
 def safe_nanmax(arr, fallback=0.0):
     try:
@@ -127,11 +129,7 @@ def compute_canopy(
     lai_max: float,
     k_beer: float,
 ):
-    """Devuelve (FC, LAI) estimados para el cultivo.
-    - Si mode_canopy == "Cobertura dinámica (%)": crece FC con logística de t_lag a t_close (cap cov_max),
-      y se deriva LAI por Beer–Lambert.
-    - Caso contrario: crece LAI con logística (cap lai_max) y se proyecta FC por Beer–Lambert.
-    """
+    """Devuelve (FC, LAI) estimados para el cultivo."""
     days_since_sow = np.array([(pd.Timestamp(d).date() - sow_date).days for d in fechas], dtype=float)
 
     def logistic_between(days, start, end, y_max):
@@ -371,8 +369,13 @@ if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Bar
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
 if post_gram:
-    back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_DAYS_DEFAULT-1)).date()
-    sched_rows.append({"Intervención": "Post · graminicida selectivo (NR, −10d)", "Inicio": str(back_ini), "Fin": str(post_gram_date), "Nota": f"Ventana hacia atrás {NR_DAYS_DEFAULT}d"})
+    back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_POST_GRAM_DAYS-1)).date()
+    sched_rows.append({
+        "Intervención": f"Post · graminicida selectivo (NR, −{NR_POST_GRAM_DAYS}d)",
+        "Inicio": str(back_ini),
+        "Fin": str(post_gram_date),
+        "Nota": f"Ventana hacia atrás {NR_POST_GRAM_DAYS}d"
+    })
 if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias}d")
 sched = pd.DataFrame(sched_rows)
 
@@ -383,7 +386,7 @@ with st.sidebar:
     ef_pre_glifo   = st.slider("Glifosato (pre, 1 día)", 0, 100, 90, 1) if pre_glifo else 0
     ef_pre_selNR   = st.slider(f"Selectivo no residual (pre, {NR_DAYS_DEFAULT}d)", 0, 100, 60, 1) if pre_selNR else 0
     ef_pre_selR    = st.slider("Selectivo + residual (pre, 30–60d)", 0, 100, 70, 1) if pre_selR else 0
-    ef_post_gram   = st.slider(f"Graminicida selectivo (post, {NR_DAYS_DEFAULT}d)", 0, 100, 65, 1) if post_gram else 0
+    ef_post_gram   = st.slider(f"Graminicida selectivo (post, {NR_POST_GRAM_DAYS}d)", 0, 100, 65, 1) if post_gram else 0
     ef_post_selR   = st.slider("Selectivo + residual (post, 30–60d)", 0, 100, 70, 1) if post_selR else 0
 
 with st.sidebar:
@@ -450,7 +453,7 @@ def apply_efficiency(weights, eff_pct):
 if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
-if post_gram: apply_efficiency(weights_backward(post_gram_date, NR_DAYS_DEFAULT), ef_post_gram)
+if post_gram: apply_efficiency(weights_backward(post_gram_date, NR_POST_GRAM_DAYS), ef_post_gram)
 if post_selR: apply_efficiency(weights_residual(post_selR_date, post_res_dias), ef_post_selR)
 
 # ==================== Control sobre SUPRESIÓN ==========================
@@ -542,7 +545,6 @@ fig.add_trace(go.Scatter(
 ))
 
 # Bandas de manejo (pre/post)
-
 def _add_label(center_ts, text, bgcolor, y=0.94):
     fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
         text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
@@ -575,10 +577,10 @@ if show_nonres_bands:
     if pre_selNR: add_residual_band(pre_selNR_date, NR_DAYS_DEFAULT, f"Sel. NR ({NR_DAYS_DEFAULT}d)")
     if post_gram:
         x_app = pd.to_datetime(post_gram_date)
-        x0 = x_app - pd.Timedelta(days=NR_DAYS_DEFAULT-1)
+        x0 = x_app - pd.Timedelta(days=NR_POST_GRAM_DAYS-1)
         x1 = x_app + pd.Timedelta(days=1)
         fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.25)
-        _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_DAYS_DEFAULT}d)", "rgba(144,238,144,0.85)")
+        _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_POST_GRAM_DAYS}d)", "rgba(144,238,144,0.85)")
 
 # Resaltar Periodo Crítico
 if use_pc:
@@ -623,7 +625,7 @@ if show_plants_axis and (factor_area_to_plants is not None) and np.isfinite(fact
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
-        dtick=DTICK_RIGHT
+        dtick={850: 170, 500: 100, 250: 50, 100: 20}.get(int(MAX_PLANTS_CAP), max(10, round(MAX_PLANTS_CAP/5)))
     )
     fig.add_trace(go.Scatter(
         x=ts, y=plantas_emerrel_cruda, name="EMERREL→pl·m²·día⁻¹ (cruda)",
@@ -662,10 +664,8 @@ st.markdown(
  **x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_
 """
 )
-# ======================= Pérdida de rendimiento (%) ===================
-# -*- coding: utf-8 -*-
-# app.py — Versión PREDWEEM sin x₁ (solo x₂ y x₃)
 
+# ======================= Pérdida de rendimiento (%) ===================
 # Función: pérdida de rendimiento según densidad efectiva
 def perdida_rinde_pct(x):
     x = np.asarray(x, dtype=float)
@@ -688,10 +688,10 @@ if factor_area_to_plants is not None:
 else:
     plm2dia_x2 = plm2dia_x3 = np.full(len(emerrel_eff_base), np.nan)
     X2 = X3 = float("nan")
+    loss_x2_pct = loss_x3_pct = float("nan")
 
 # Mostrar resultados
 st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
-
 st.markdown(
     f"""
 ### x₂ — Con supresión (sin control)  
@@ -703,7 +703,6 @@ x = **{X3:,.1f}** pl·m² → pérdida estimada: **{loss_x3_pct:.2f}%**
 )
 
 # ================= Gráfico: Pérdida (%) vs x =================
-
 x_curve = np.linspace(0.0, MAX_PLANTS_CAP, 400)
 y_curve = perdida_rinde_pct(x_curve)
 
@@ -803,18 +802,19 @@ _diag = {
     # Escala por área
     "factor_pl_m2_por_EMERREL_dia": float(factor_area_to_plants) if (factor_area_to_plants is not None) else None,
     # A2/x
-    "A2_sup_raw_por_AUC": float(A2_sup_raw) if np.isfinite(A2_sup_raw) else None,
-    "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) else None,
-    "A2_sup_cap": float(A2_sup_final) if np.isfinite(A2_sup_final) else None,
-    "A2_ctrl_cap": float(A2_ctrl_final) if np.isfinite(A2_ctrl_final) else None,
-    "X_eff_pc": float(X_eff_pc) if np.isfinite(X_eff_pc) else None,
+    "A2_sup_raw_por_AUC": float(A2_sup_raw) if (factor_area_to_plants is not None and np.isfinite(A2_sup_raw)) else None,
+    "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_raw)) else None,
+    "A2_sup_cap": float(A2_sup_final) if (factor_area_to_plants is not None and np.isfinite(A2_sup_final)) else None,
+    "A2_ctrl_cap": float(A2_ctrl_final) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_final)) else None,
+    "X_eff_pc": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
     # Fenología por edad en PC
     "reglas_fenologia_por_edad_PC": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
     "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
     "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
     # Manejo
     "decaimiento": decaimiento_tipo,
-    "NR_no_residuales_dias": NR_DAYS_DEFAULT
+    "NR_no_residuales_dias": NR_DAYS_DEFAULT,
+    "NR_graminicida_post_dias": NR_POST_GRAM_DAYS
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
@@ -824,7 +824,7 @@ st.subheader("Contribución de plantas por estado (S1..S4)")
 if (factor_area_to_plants is None) or (not np.isfinite(factor_area_to_plants)):
     st.info("Para ver contribuciones por estado necesitás que la escala por AUC esté activa (AUC cruda > 0).")
 else:
-    # --- Totales por estado (ya calculados arriba en Diagnóstico) ---
+    # --- Totales por estado ---
     contrib_dict = {
         "S1 (FC=0.0)": contrib_S1,
         "S2 (FC=0.3)": contrib_S2,
@@ -842,7 +842,7 @@ else:
         np.nan
     )
 
-    # --- (1) Gráfico de barras: aporte total por estado ---
+    # --- (1) Gráfico de barras ---
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=df_contrib["Estado"],
@@ -861,8 +861,7 @@ else:
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # --- (2) Serie temporal apilada: contribución diaria por estado ---
-    # Cada traza toma sólo su máscara; fuera de la máscara aporta 0.
+    # --- (2) Serie temporal apilada ---
     s1 = np.where(mask_S1 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s2 = np.where(mask_S2 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s3 = np.where(mask_S3 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
@@ -899,6 +898,5 @@ else:
         "text/csv",
         key="dl_aportes_estados"
     )
-
 
 
