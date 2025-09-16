@@ -427,7 +427,7 @@ def weights_residual(start_date, dias):
 
 def weights_backward(center_date, dias):
     """Ventana hacia atrás de longitud 'dias' que incluye el día de aplicación.
-       Ej.: dias=14 → afecta [aplicación-13, …, aplicación]."""
+       Ej.: dias=10 → afecta [aplicación-9, …, aplicación]."""
     w = np.zeros_like(fechas_d, dtype=float)
     if (not center_date) or (not dias) or (int(dias) <= 0):
         return w
