@@ -26,7 +26,7 @@ st.caption("AUC de EMERREL (cruda) ≙ tope A2 (850/500/250/100 pl·m²). A2, x 
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10          # NR por defecto (pre y NR en general)
-NR_POST_GRAM_DAYS = 14        # NUEVO: ventana hacia atrás del graminicida post
+NR_POST_GRAM_DAYS = 14        # Ventana hacia atrás del graminicida post
 
 def safe_nanmax(arr, fallback=0.0):
     try:
@@ -376,7 +376,7 @@ if post_gram:
     back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_POST_GRAM_DAYS-1)).date()
     sched_rows.append({"Intervención": f"Post · graminicida selectivo (NR, −{NR_POST_GRAM_DAYS}d)",
                        "Inicio": str(back_ini), "Fin": str(post_gram_date),
-                       "Nota": f"Ventana hacia atrás {NR_POST_GRAM_DAYS}d (solo S1–S2)"})
+                       "Nota": f"Ventana hacia atrás {NR_POST_GRAM_DAYS}d (S1–S3)"})
 if post_selR: add_sched("Post · selectivo + residual", post_selR_date, post_res_dias, f"Protege {post_res_dias}d")
 sched = pd.DataFrame(sched_rows)
 
@@ -454,10 +454,10 @@ if pre_glifo: apply_efficiency(weights_one_day(pre_glifo_date), ef_pre_glifo)
 if pre_selNR: apply_efficiency(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR)
 if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef_pre_selR)
 
-# Graminicida post — SOLO S1/S2 y 14 días hacia atrás
+# Graminicida post — S1/S2/S3 y 14 días hacia atrás
 if post_gram:
     w_pg = weights_backward(post_gram_date, NR_POST_GRAM_DAYS).astype(float)
-    w_pg *= (mask_S1 | mask_S2).astype(float)  # restringe el efecto a estados S1–S2
+    w_pg *= (mask_S1 | mask_S2 | mask_S3).astype(float)  # ahora S1–S3
     apply_efficiency(w_pg, ef_post_gram)
 
 # Selectivo + residual post
@@ -581,7 +581,7 @@ if show_nonres_bands:
         x0 = x_app - pd.Timedelta(days=NR_POST_GRAM_DAYS-1)
         x1 = x_app + pd.Timedelta(days=1)
         fig.add_vrect(x0=x0, x1=x1, line_width=0, fillcolor="LightGreen", opacity=0.25)
-        _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_POST_GRAM_DAYS}d, S1–S2)", "rgba(144,238,144,0.85)")
+        _add_label(x0 + (x1 - x0)/2, f"Graminicida (−{NR_POST_GRAM_DAYS}d, S1–S3)", "rgba(144,238,144,0.85)")
 
 # Resaltar Periodo Crítico
 if use_pc:
@@ -749,9 +749,9 @@ out.rename(columns={"EMERREL": "EMERREL_cruda"}, inplace=True)
 out["EMERREL_supresion"]      = emerrel_supresion
 out["EMERREL_supresion_ctrl"] = emerrel_supresion_ctrl
 if factor_area_to_plants is not None:
-    out["plm2dia_cruda"]             = np.round(plantas_emerrel_cruda, 4)
-    out["plm2dia_supresion"]         = np.round(plantas_supresion, 4)
-    out["plm2dia_supresion_ctrl"]    = np.round(plantas_supresion_ctrl, 4)
+    out["plm2dia_cruda"]              = np.round(plantas_emerrel_cruda, 4)
+    out["plm2dia_supresion"]          = np.round(plantas_supresion, 4)
+    out["plm2dia_supresion_ctrl"]     = np.round(plantas_supresion_ctrl, 4)
     out["plm2dia_supresion_ctrl_eff"] = np.round(plm2dia_ctrl_eff, 4)
     a2cum_df = pd.DataFrame({
         "fecha": pd.to_datetime(ts),
@@ -811,7 +811,7 @@ _diag = {
     "decaimiento": decaimiento_tipo,
     "NR_no_residuales_dias": NR_DAYS_DEFAULT,
     "NR_post_gram_dias": NR_POST_GRAM_DAYS,
-    "control_post_gram_estados": "S1–S2"
+    "control_post_gram_estados": "S1–S3"
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
