@@ -399,6 +399,43 @@ with st.sidebar:
     else:
         lam_exp = None
 
+with st.expander("Debug graminicida post", expanded=False):
+    if post_gram:
+        # Máscara de estados actualmente usada (S1–S3 en tu versión)
+        mask_pg_est = (mask_S1 | mask_S2 | mask_S3)
+
+        # Ventana temporal hacia atrás
+        w_pg_dbg = weights_backward(post_gram_date, NR_POST_GRAM_DAYS).astype(float)
+        # Restringida por estados
+        w_pg_dbg *= mask_pg_est.astype(float)
+
+        # Sólo para inspección del efecto del graminicida (sin otras intervenciones)
+        ctrl_only_pg = 1.0 - (ef_post_gram / 100.0) * w_pg_dbg
+        emerrel_supresion_ctrl_pg = emerrel_supresion * ctrl_only_pg
+
+        # Ventana de 20 días alrededor de la aplicación para ver qué pasa
+        d0 = pd.to_datetime(post_gram_date) - pd.Timedelta(days=20)
+        d1 = pd.to_datetime(post_gram_date) + pd.Timedelta(days=2)
+        sel = (ts >= d0) & (ts <= d1)
+
+        df_dbg = pd.DataFrame({
+            "fecha": ts[sel].dt.date,
+            "EMERREL": df_plot["EMERREL"][sel].to_numpy(),
+            "Ciec": np.round(Ciec[sel], 3),
+            "sup": np.round(emerrel_supresion[sel], 4),
+            "w_pg": np.round(w_pg_dbg[sel], 2),
+            "estado": np.where(mask_S4[sel], "S4", np.where(mask_S3[sel], "S3", np.where(mask_S2[sel], "S2", "S1"))),
+            "sup_ctrl_pg": np.round(emerrel_supresion_ctrl_pg[sel], 4)
+        })
+        st.write({
+            "dias_ventana_total": int((w_pg_dbg > 0).sum()),
+            "dias_ventana_con_supresion>0": int(((w_pg_dbg > 0) & (emerrel_supresion > 0)).sum()),
+            "ef_post_gram_%": int(ef_post_gram)
+        })
+        st.dataframe(df_dbg, use_container_width=True)
+    else:
+        st.info("Activá el graminicida post para ver el debug.")
+
 # =================== Factor de control diario =========================
 fechas_d = ts.dt.date.values
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
