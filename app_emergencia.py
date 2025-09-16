@@ -26,7 +26,7 @@ st.caption("AUC de EMERREL (cruda) ≙ tope A2 (850/500/250/100 pl·m²). A2, x 
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10          # NR por defecto (pre y NR en general)
-NR_POST_GRAM_DAYS = 14        # Ventana hacia atrás del graminicida post
+NR_POST_GRAM_DAYS = 14        # Ventana hacia atrás del graminicida post (S1–S3)
 
 def safe_nanmax(arr, fallback=0.0):
     try:
@@ -371,7 +371,7 @@ for w in warnings: st.warning(w)
 if pre_glifo: add_sched("Pre · glifosato (NSr, 1d)", pre_glifo_date, None, "Barbecho")
 if pre_selNR: add_sched(f"Pre · selectivo no residual (NR)", pre_selNR_date, NR_DAYS_DEFAULT, f"NR por defecto {NR_DAYS_DEFAULT}d")
 if pre_selR:  add_sched("Pre · selectivo + residual", pre_selR_date, pre_res_dias, f"Protege {pre_res_dias} días")
-# Post graminicida: ventana hacia atrás de 14d
+# Post graminicida: ventana hacia atrás de 14d, S1–S3
 if post_gram:
     back_ini = (pd.to_datetime(post_gram_date) - pd.Timedelta(days=NR_POST_GRAM_DAYS-1)).date()
     sched_rows.append({"Intervención": f"Post · graminicida selectivo (NR, −{NR_POST_GRAM_DAYS}d)",
@@ -399,38 +399,46 @@ with st.sidebar:
     else:
         lam_exp = None
 
+# ===================== Debug graminicida post (autocontenido) =====================
 with st.expander("Debug graminicida post", expanded=False):
     if post_gram:
-        # Máscara de estados actualmente usada (S1–S3 en tu versión)
+        # Estados fijos S1–S3 (sin selector)
         mask_pg_est = (mask_S1 | mask_S2 | mask_S3)
 
-        # Ventana temporal hacia atrás
-        w_pg_dbg = weights_backward(post_gram_date, NR_POST_GRAM_DAYS).astype(float)
-        # Restringida por estados
-        w_pg_dbg *= mask_pg_est.astype(float)
+        # Ventana temporal hacia atrás: [fecha-13, fecha] para 14 días
+        d0 = post_gram_date - timedelta(days=NR_POST_GRAM_DAYS-1)
+        d1 = post_gram_date + timedelta(days=1)
+        in_window = (ts.dt.date >= d0) & (ts.dt.date < d1)
 
-        # Sólo para inspección del efecto del graminicida (sin otras intervenciones)
+        # Peso de graminicida restringido por tiempo y estados
+        w_pg_dbg = (in_window & mask_pg_est).astype(float)
+
+        # Solo efecto del graminicida (para inspección)
         ctrl_only_pg = 1.0 - (ef_post_gram / 100.0) * w_pg_dbg
         emerrel_supresion_ctrl_pg = emerrel_supresion * ctrl_only_pg
 
-        # Ventana de 20 días alrededor de la aplicación para ver qué pasa
-        d0 = pd.to_datetime(post_gram_date) - pd.Timedelta(days=20)
-        d1 = pd.to_datetime(post_gram_date) + pd.Timedelta(days=2)
-        sel = (ts >= d0) & (ts <= d1)
+        # Ventana de visualización alrededor de la aplicación
+        vis_start = pd.to_datetime(post_gram_date) - pd.Timedelta(days=20)
+        vis_end   = pd.to_datetime(post_gram_date) + pd.Timedelta(days=2)
+        sel = (ts >= vis_start) & (ts <= vis_end)
 
         df_dbg = pd.DataFrame({
             "fecha": ts[sel].dt.date,
+            "estado": np.where(mask_S4[sel], "S4",
+                        np.where(mask_S3[sel], "S3",
+                        np.where(mask_S2[sel], "S2", "S1"))),
             "EMERREL": df_plot["EMERREL"][sel].to_numpy(),
             "Ciec": np.round(Ciec[sel], 3),
             "sup": np.round(emerrel_supresion[sel], 4),
             "w_pg": np.round(w_pg_dbg[sel], 2),
-            "estado": np.where(mask_S4[sel], "S4", np.where(mask_S3[sel], "S3", np.where(mask_S2[sel], "S2", "S1"))),
-            "sup_ctrl_pg": np.round(emerrel_supresion_ctrl_pg[sel], 4)
+            "sup_ctrl_solo_pg": np.round(emerrel_supresion_ctrl_pg[sel], 4),
         })
+
         st.write({
-            "dias_ventana_total": int((w_pg_dbg > 0).sum()),
-            "dias_ventana_con_supresion>0": int(((w_pg_dbg > 0) & (emerrel_supresion > 0)).sum()),
-            "ef_post_gram_%": int(ef_post_gram)
+            "dias_en_ventana_total": int(in_window.sum()),
+            "dias_en_ventana_con_estados(S1–S3)": int((in_window & mask_pg_est).sum()),
+            "dias_con_supresion>0_y_efecto": int(((emerrel_supresion > 0) & (w_pg_dbg > 0)).sum()),
+            "ef_post_gram_%": int(ef_post_gram),
         })
         st.dataframe(df_dbg, use_container_width=True)
     else:
@@ -494,7 +502,7 @@ if pre_selR:  apply_efficiency(weights_residual(pre_selR_date, pre_res_dias), ef
 # Graminicida post — S1/S2/S3 y 14 días hacia atrás
 if post_gram:
     w_pg = weights_backward(post_gram_date, NR_POST_GRAM_DAYS).astype(float)
-    w_pg *= (mask_S1 | mask_S2 | mask_S3).astype(float)  # ahora S1–S3
+    w_pg *= (mask_S1 | mask_S2 | mask_S3).astype(float)  # S1–S3
     apply_efficiency(w_pg, ef_post_gram)
 
 # Selectivo + residual post
@@ -662,7 +670,7 @@ if show_plants_axis and (factor_area_to_plants is not None) and np.isfinite(fact
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
-        dtick=DTICK_RIGHT
+        dtick= {850:170, 500:100, 250:50, 100:20}.get(int(MAX_PLANTS_CAP), max(10, round(MAX_PLANTS_CAP/5)))
     )
     fig.add_trace(go.Scatter(
         x=ts, y=plantas_emerrel_cruda, name="EMERREL→pl·m²·día⁻¹ (cruda)",
@@ -702,7 +710,6 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
-# Versión sin x1 (solo x2, x3)
 def perdida_rinde_pct(x):
     x = np.asarray(x, dtype=float)
     return 0.375 * x / (1.0 + (0.375 * x / 76.639))
@@ -920,14 +927,3 @@ else:
         margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_area, use_container_width=True)
-
-    # (3) Tabla + descarga
-    st.markdown("**Totales** desde siembra (cap en x = tope A2):")
-    st.dataframe(df_contrib, use_container_width=True)
-    st.download_button(
-        "Descargar aportes por estado (CSV)",
-        df_contrib.to_csv(index=False).encode("utf-8"),
-        "aportes_por_estado.csv",
-        "text/csv",
-        key="dl_aportes_estados"
-    )
