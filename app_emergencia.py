@@ -807,51 +807,6 @@ with st.expander("Descargas de series", expanded=True):
                            a2cum_df.to_csv(index=False).encode("utf-8"),
                            "acumulados_a2_x.csv", "text/csv", key="dl_a2cum")
 
-# ============================== Diagnóstico ===========================
-st.subheader("Diagnóstico")
-
-if factor_area_to_plants is not None:
-    contrib_S1 = float(np.nansum(plantas_supresion_ctrl[mask_S1 & mask_after_sow]))
-    contrib_S2 = float(np.nansum(plantas_supresion_ctrl[mask_S2 & mask_after_sow]))
-    contrib_S3 = float(np.nansum(plantas_supresion_ctrl[mask_S3 & mask_after_sow]))
-    contrib_S4 = float(np.nansum(plantas_supresion_ctrl[mask_S4 & mask_after_sow]))
-else:
-    contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
-
-_diag = {
-    "siembra": str(sow_date),
-    "tope_A2_plm2": MAX_PLANTS_CAP,
-    "PC": {"start": str(PC_START.date()), "end": str(PC_END.date()), "ref": ref_pc},
-    # AUCs
-    "AUC_EMERREL_cruda_desde_siembra_dias": float(auc_cruda),
-    "AUC_supresion_desde_siembra_dias": float(auc_sup),
-    "AUC_supresion_ctrl_desde_siembra_dias": float(auc_sup_ctrl),
-    # Escala por área
-    "factor_pl_m2_por_EMERREL_dia": float(factor_area_to_plants) if (factor_area_to_plants is not None) else None,
-    # A2/x
-    "A2_sup_raw_por_AUC": float(A2_sup_raw) if (factor_area_to_plants is not None and np.isfinite(A2_sup_raw)) else None,
-    "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_raw)) else None,
-    "A2_sup_cap": float(A2_sup_final) if (factor_area_to_plants is not None and np.isfinite(A2_sup_final)) else None,
-    "A2_ctrl_cap": float(A2_ctrl_final) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_final)) else None,
-    "X_eff_pc": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
-    # Fenología por edad en PC
-    "reglas_fenologia_por_edad_PC": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
-    "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
-    "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
-    # Manejo
-    "decaimiento": decaimiento_tipo,
-}
-# Si usaste selección de estados por tratamiento, agregá qué estados fueron seleccionados
-if 'states_glifo' in locals() or 'states_gram' in locals():
-    _diag["estados_por_tratamiento"] = {
-        "glifosato_pre": states_glifo if 'states_glifo' in locals() else None,
-        "selectivo_NR_pre": states_preNR if 'states_preNR' in locals() else None,
-        "selectivo_residual_pre": states_preR if 'states_preR' in locals() else None,
-        "graminicida_post": states_gram if 'states_gram' in locals() else None,
-        "selectivo_residual_post": states_postR if 'states_postR' in locals() else None,
-    }
-
-st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
 # ===================== Contribución de plantas por estado (S1..S4) =====================
 st.subheader("Contribución de plantas por estado (S1..S4)")
@@ -935,3 +890,48 @@ else:
         key="dl_aportes_estados"
     )
 
+# ============================== Diagnóstico ===========================
+st.subheader("Diagnóstico")
+
+if factor_area_to_plants is not None:
+    contrib_S1 = float(np.nansum(plantas_supresion_ctrl[mask_S1 & mask_after_sow]))
+    contrib_S2 = float(np.nansum(plantas_supresion_ctrl[mask_S2 & mask_after_sow]))
+    contrib_S3 = float(np.nansum(plantas_supresion_ctrl[mask_S3 & mask_after_sow]))
+    contrib_S4 = float(np.nansum(plantas_supresion_ctrl[mask_S4 & mask_after_sow]))
+else:
+    contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
+
+_diag = {
+    "siembra": str(sow_date),
+    "tope_A2_plm2": MAX_PLANTS_CAP,
+    "PC": {"start": str(PC_START.date()), "end": str(PC_END.date()), "ref": ref_pc},
+    # AUCs
+    "AUC_EMERREL_cruda_desde_siembra_dias": float(auc_cruda),
+    "AUC_supresion_desde_siembra_dias": float(auc_sup),
+    "AUC_supresion_ctrl_desde_siembra_dias": float(auc_sup_ctrl),
+    # Escala por área
+    "factor_pl_m2_por_EMERREL_dia": float(factor_area_to_plants) if (factor_area_to_plants is not None) else None,
+    # A2/x
+    "A2_sup_raw_por_AUC": float(A2_sup_raw) if (factor_area_to_plants is not None and np.isfinite(A2_sup_raw)) else None,
+    "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_raw)) else None,
+    "A2_sup_cap": float(A2_sup_final) if (factor_area_to_plants is not None and np.isfinite(A2_sup_final)) else None,
+    "A2_ctrl_cap": float(A2_ctrl_final) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_final)) else None,
+    "X_eff_pc": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
+    # Fenología por edad en PC
+    "reglas_fenologia_por_edad_PC": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
+    "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
+    "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
+    # Manejo
+    "decaimiento": decaimiento_tipo,
+}
+# Si usaste selección de estados por tratamiento, agregá qué estados fueron seleccionados
+if 'states_glifo' in locals() or 'states_gram' in locals():
+    _diag["estados_por_tratamiento"] = {
+        "glifosato_pre": states_glifo if 'states_glifo' in locals() else None,
+        "selectivo_NR_pre": states_preNR if 'states_preNR' in locals() else None,
+        "selectivo_residual_pre": states_preR if 'states_preR' in locals() else None,
+        "graminicida_post": states_gram if 'states_gram' in locals() else None,
+        "selectivo_residual_post": states_postR if 'states_postR' in locals() else None,
+    }
+
+st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
