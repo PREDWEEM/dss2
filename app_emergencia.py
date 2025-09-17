@@ -1,4 +1,3 @@
-
 # -*- coding: utf-8 -*-
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (AUC) + Fenología por COHORTES (S1..S4)
 # - Sin ICIC
@@ -6,11 +5,11 @@
 # - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (850/500/250/100 pl·m²)
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
-# - Fenología (Avena fatua) por COHORTES: S1=1–6, S2=7–27, S3=28–59, S4=≥60 (edad desde la emergencia)
-# - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra
+# - Fenología (Avena fatua) por COHORTES: S1=1–6, S2=7–27, S3=28–59, S4=≥60 (edad desde emergencia)
+# - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra (t=0)
 # - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable)
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
-# - ▶ Salidas principales en **pl·m²·mes⁻¹** (plm2mes_*). Cap A2 estricto.
+# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas ISO iniciando lunes). Cap A2 estricto.
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -21,10 +20,10 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2 · Salidas mensuales"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2 · Salidas semanales"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("AUC(EMERREL cruda) ≙ tope A2 (850/500/250/100 pl·m²). Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·mes⁻¹ con cap acumulativo A2.")
+st.caption("AUC(EMERREL cruda) ≙ tope A2 (850/500/250/100 pl·m²). Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2, computando desde siembra (t=0).")
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10
@@ -33,8 +32,7 @@ POST_GRAM_FORWARD_DAYS = 11
 def safe_nanmax(arr, fallback=0.0):
     try:
         val = np.nanmax(arr)
-        if np.isfinite(val):
-            return float(val)
+        if np.isfinite(val): return float(val)
         return float(fallback)
     except Exception:
         return float(fallback)
@@ -44,15 +42,13 @@ def sniff_sep_dec(text: str):
     counts = {sep: sample.count(sep) for sep in [",", ";", "\t"]}
     sep_guess = max(counts, key=counts.get) if counts else ","
     dec_guess = "."
-    if sample.count(",") > sample.count(".") and re.search(r",\d", sample):
-        dec_guess = ","
+    if sample.count(",") > sample.count(".") and re.search(r",\d", sample): dec_guess = ","
     return sep_guess, dec_guess
 
 @st.cache_data(show_spinner=False)
 def read_raw_from_url(url: str) -> bytes:
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
-    with urlopen(req, timeout=30) as r:
-        return r.read()
+    with urlopen(req, timeout=30) as r: return r.read()
 
 def read_raw(up, url):
     if up is not None: return up.read()
@@ -95,24 +91,18 @@ def cumulative_auc_series(fecha: pd.Series, y: np.ndarray, mask=None) -> pd.Seri
     out = np.zeros_like(y_arr, dtype=float)
     for i in range(1, len(y_arr)):
         dt_i = max(0.0, t[i] - t[i-1])
-        out[i] = out[i-1] + 0.5 * (y_arr[i-1] + y_arr[i]) * dt_i
+        out[i] = out[i-1] + 0.5*(y_arr[i-1] + y_arr[i]) * dt_i
     return pd.Series(out, index=f)
 
 def cap_cumulative(series, cap, active_mask):
-    """
-    Tope acumulativo (cap) para una serie diaria >=0.
-    active_mask = True para los días a considerar (p.ej., desde siembra).
-    Nunca permite que la suma desde siembra supere 'cap'.
-    """
+    """Tope acumulativo (cap) para serie diaria >=0, activa sólo donde active_mask=True."""
     y = np.asarray(series, dtype=float)
-    out = np.zeros_like(y)
-    cum = 0.0
+    out = np.zeros_like(y); cum = 0.0
     for i in range(len(y)):
         if bool(active_mask[i]):
             allowed = max(0.0, cap - cum)
             val = min(max(0.0, y[i]), allowed)
-            out[i] = val
-            cum += val
+            out[i] = val; cum += val
         else:
             out[i] = 0.0
     return out
@@ -244,7 +234,7 @@ else: PC_REF = PC_END
 
 with st.sidebar:
     st.header("Etiquetas y escalas")
-    show_plants_axis = st.checkbox("Mostrar Plantas·m²·mes⁻¹ (eje derecho)", value=True)
+    show_plants_axis = st.checkbox("Mostrar Plantas·m²·sem⁻¹ (eje derecho)", value=True)
     show_ciec_curve = st.checkbox("Mostrar curva Ciec (0–1)", value=True)
     show_nonres_bands = st.checkbox("Marcar bandas de efecto", value=True)
 
@@ -266,10 +256,12 @@ one_minus_Ciec = np.clip((1.0 - Ciec).astype(float), 0.0, 1.0)
 
 # ===================== Cohortes S1..S4 (edad desde emergencia) =====================
 ts = pd.to_datetime(df_plot["fecha"])
-fechas_series = ts.dt.date.values
+mask_since_sow = (ts.dt.date >= sow_date)  # <<<<< Solo desde siembra (t=0)
 
 births = df_plot["EMERREL"].astype(float).to_numpy()
 births = np.clip(births, 0.0, None)
+# Anular nacimientos previos a siembra:
+births = np.where(mask_since_sow.to_numpy(), births, 0.0)
 births_series = pd.Series(births, index=pd.to_datetime(df_plot["fecha"]))
 
 def roll_sum_shift(s: pd.Series, win: int, shift_days: int) -> pd.Series:
@@ -289,8 +281,7 @@ S3_arr = S3_coh.reindex(pd.to_datetime(df_plot["fecha"])).to_numpy(dtype=float)
 S4_arr = S4_coh.reindex(pd.to_datetime(df_plot["fecha"])).to_numpy(dtype=float)
 
 # ================== AUC y factor de equivalencia por ÁREA =============
-mask_after_sow = (ts.dt.date >= sow_date)
-auc_cruda = auc_time(ts, df_plot["EMERREL"].to_numpy(dtype=float), mask=mask_after_sow)
+auc_cruda = auc_time(ts, df_plot["EMERREL"].to_numpy(dtype=float), mask=mask_since_sow)
 
 if auc_cruda > 0:
     factor_area_to_plants = MAX_PLANTS_CAP / auc_cruda
@@ -362,7 +353,7 @@ with st.sidebar:
     st.header("Decaimiento en residuales")
     decaimiento_tipo = st.selectbox("Tipo de decaimiento", ["Ninguno", "Lineal", "Exponencial"], index=0)
     if decaimiento_tipo == "Exponencial":
-        half_life = st.number_input("Semivida (días) para exponencial", 1, 120, 20, 1)
+        half_life = st.number_input("Semivida (días)", 1, 120, 20, 1)
         lam_exp = math.log(2) / max(1e-6, half_life)
     else:
         lam_exp = None
@@ -383,11 +374,12 @@ with st.sidebar:
     states_gram  = st.multiselect("Graminicida (post)", ["S1","S2","S3","S4"], default_gram, disabled=not post_gram)
     states_postR = st.multiselect("Selectivo + residual (post)", ["S1","S2","S3","S4"], default_postR, disabled=not post_selR)
 
+# fallbacks
 if pre_selNR and (len(states_preNR) == 0): states_preNR = ["S1","S2","S3","S4"]
 if pre_selR  and (len(states_preR)  == 0): states_preR  = ["S1","S2","S3","S4"]
 
+# =================== Ventanas de efecto ======================
 fechas_d = ts.dt.date.values
-
 def weights_one_day(date_val):
     if not date_val: return np.zeros_like(fechas_d, dtype=float)
     d0 = date_val
@@ -403,10 +395,10 @@ def weights_residual(start_date, dias):
     if decaimiento_tipo == "Ninguno": w[idxs] = 1.0
     elif decaimiento_tipo == "Lineal":
         L = max(1, len(idxs)); w[idxs] = 1.0 - (t_rel / max(1.0, L - 1))
-    else:
-        w[idxs] = np.exp(-lam_exp * t_rel) if lam_exp is not None else 1.0
+    else: w[idxs] = np.exp(-lam_exp * t_rel) if lam_exp is not None else 1.0
     return w
 
+# =================== Control por estado =====================
 ctrl_S1 = np.ones_like(fechas_d, dtype=float)
 ctrl_S2 = np.ones_like(fechas_d, dtype=float)
 ctrl_S3 = np.ones_like(fechas_d, dtype=float)
@@ -433,10 +425,15 @@ if factor_area_to_plants is not None:
     S3_pl = S3_arr * one_minus_Ciec * FC_S["S3"] * factor_area_to_plants
     S4_pl = S4_arr * one_minus_Ciec * FC_S["S4"] * factor_area_to_plants
 
-    S1_pl_ctrl = S1_pl * ctrl_S1
-    S2_pl_ctrl = S2_pl * ctrl_S2
-    S3_pl_ctrl = S3_pl * ctrl_S3
-    S4_pl_ctrl = S4_pl * ctrl_S4
+    # 0 antes de siembra
+    ms = mask_since_sow.to_numpy()
+    S1_pl = np.where(ms, S1_pl, 0.0); S2_pl = np.where(ms, S2_pl, 0.0)
+    S3_pl = np.where(ms, S3_pl, 0.0); S4_pl = np.where(ms, S4_pl, 0.0)
+
+    S1_pl_ctrl = np.where(ms, S1_pl * ctrl_S1, 0.0)
+    S2_pl_ctrl = np.where(ms, S2_pl * ctrl_S2, 0.0)
+    S3_pl_ctrl = np.where(ms, S3_pl * ctrl_S3, 0.0)
+    S4_pl_ctrl = np.where(ms, S4_pl * ctrl_S4, 0.0)
 
     plantas_supresion      = (S1_pl + S2_pl + S3_pl + S4_pl)
     plantas_supresion_ctrl = (S1_pl_ctrl + S2_pl_ctrl + S3_pl_ctrl + S4_pl_ctrl)
@@ -448,31 +445,33 @@ else:
 # ==================== Tope A2 estricto (cap acumulativo) ====================
 if factor_area_to_plants is not None:
     base_pl_daily = df_plot["EMERREL"].to_numpy(dtype=float) * factor_area_to_plants
-    base_pl_daily_cap = cap_cumulative(base_pl_daily, MAX_PLANTS_CAP, mask_after_sow.to_numpy())
+    base_pl_daily = np.where(mask_since_sow.to_numpy(), base_pl_daily, 0.0)
+    base_pl_daily_cap = cap_cumulative(base_pl_daily, MAX_PLANTS_CAP, mask_since_sow.to_numpy())
+
     plantas_supresion_cap = np.minimum(plantas_supresion, base_pl_daily_cap)
     plantas_supresion_ctrl_cap = np.minimum(plantas_supresion_ctrl, plantas_supresion_cap)
 else:
     base_pl_daily = base_pl_daily_cap = np.full(len(ts), np.nan)
     plantas_supresion_cap = plantas_supresion_ctrl_cap = np.full(len(ts), np.nan)
 
-# ============ Agregación MENSUAL (pl·m²·mes⁻¹) para salidas principales ============
+# ============ Agregación SEMANAL (pl·m²·sem⁻¹, semanas ISO Lunes) ============
 df_daily_cap = pd.DataFrame({
     "fecha": pd.to_datetime(ts),
-    "pl_sin_ctrl_cap": plantas_supresion_cap,
-    "pl_con_ctrl_cap": plantas_supresion_ctrl_cap,
-    "pl_base_cap": base_pl_daily_cap,
+    "pl_sin_ctrl_cap": np.where(mask_since_sow.to_numpy(), plantas_supresion_cap, 0.0),
+    "pl_con_ctrl_cap": np.where(mask_since_sow.to_numpy(), plantas_supresion_ctrl_cap, 0.0),
+    "pl_base_cap":     np.where(mask_since_sow.to_numpy(), base_pl_daily_cap, 0.0),
 })
-df_month_cap = (
+df_week_cap = (
     df_daily_cap
     .set_index("fecha")
-    .resample("MS")  # month start
+    .resample("W-MON")  # semana que cierra LUNES (W-MON: etiqueta = lunes)
     .sum()
     .reset_index()
 )
-mes_x = df_month_cap["fecha"]
-plm2mes_sin_ctrl_cap = df_month_cap["pl_sin_ctrl_cap"].to_numpy()
-plm2mes_con_ctrl_cap = df_month_cap["pl_con_ctrl_cap"].to_numpy()
-plm2mes_base_cap     = df_month_cap["pl_base_cap"].to_numpy()
+sem_x = df_week_cap["fecha"]  # marca el LUNES de cada semana agregada
+plm2sem_sin_ctrl_cap = df_week_cap["pl_sin_ctrl_cap"].to_numpy()
+plm2sem_con_ctrl_cap = df_week_cap["pl_con_ctrl_cap"].to_numpy()
+plm2sem_base_cap     = df_week_cap["pl_base_cap"].to_numpy()
 
 # ============= A2 por AUC (área) — usando series capeadas (diarias) =============
 if factor_area_to_plants is not None and auc_cruda > 0:
@@ -480,8 +479,8 @@ if factor_area_to_plants is not None and auc_cruda > 0:
                            out=np.zeros_like(plantas_supresion_cap),     where=(factor_area_to_plants>0))
     supc_equiv = np.divide(plantas_supresion_ctrl_cap, factor_area_to_plants,
                            out=np.zeros_like(plantas_supresion_ctrl_cap), where=(factor_area_to_plants>0))
-    auc_sup      = auc_time(ts, sup_equiv,  mask=mask_after_sow)
-    auc_sup_ctrl = auc_time(ts, supc_equiv, mask=mask_after_sow)
+    auc_sup      = auc_time(ts, sup_equiv,  mask=mask_since_sow)
+    auc_sup_ctrl = auc_time(ts, supc_equiv, mask=mask_since_sow)
     A2_sup_raw  = MAX_PLANTS_CAP * (auc_sup      / auc_cruda)
     A2_ctrl_raw = MAX_PLANTS_CAP * (auc_sup_ctrl / auc_cruda)
 else:
@@ -491,10 +490,9 @@ A2_ctrl_final = min(MAX_PLANTS_CAP, A2_ctrl_raw) if np.isfinite(A2_ctrl_raw) els
 
 # ======== x (densidad efectiva) y pérdidas — integrando escapes (diarias cap) ========
 def perdida_rinde_pct(x): x = np.asarray(x, dtype=float); return 0.375 * x / (1.0 + (0.375 * x / 76.639))
-
 if factor_area_to_plants is not None:
-    X2 = float(np.nansum(plantas_supresion_cap[mask_after_sow]))
-    X3 = float(np.nansum(plantas_supresion_ctrl_cap[mask_after_sow]))
+    X2 = float(np.nansum(plantas_supresion_cap[mask_since_sow]))
+    X3 = float(np.nansum(plantas_supresion_ctrl_cap[mask_since_sow]))
     loss_x2_pct = float(perdida_rinde_pct(X2)) if np.isfinite(X2) else float("nan")
     loss_x3_pct = float(perdida_rinde_pct(X3)) if np.isfinite(X3) else float("nan")
 else:
@@ -512,39 +510,39 @@ fig.add_trace(go.Scatter(
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title="EMERREL + Aportes (cohortes, cap A2) · Serie mensual",
+    title="EMERREL + Aportes (cohortes, cap A2) · Serie semanal (W-MON)",
     xaxis_title="Tiempo",
     yaxis_title="EMERREL",
 )
 
 if factor_area_to_plants is not None and show_plants_axis:
     plantas_max = float(np.nanmax([
-        safe_nanmax(plm2mes_sin_ctrl_cap, MAX_PLANTS_CAP),
-        safe_nanmax(plm2mes_con_ctrl_cap, MAX_PLANTS_CAP),
+        safe_nanmax(plm2sem_sin_ctrl_cap, MAX_PLANTS_CAP),
+        safe_nanmax(plm2sem_con_ctrl_cap, MAX_PLANTS_CAP),
         MAX_PLANTS_CAP
     ]))
     if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = MAX_PLANTS_CAP
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
-        title="Plantas·m²·mes⁻¹ (cohortes, cap A2)",
+        title="Plantas·m²·sem⁻¹ (cohortes, cap A2)",
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
         dtick=DTICK_RIGHT
     )
     fig.add_trace(go.Scatter(
-        x=mes_x, y=plm2mes_sin_ctrl_cap, name="Aporte mensual (sin control, cap)",
+        x=sem_x, y=plm2sem_sin_ctrl_cap, name="Aporte semanal (sin control, cap)",
         yaxis="y2", mode="lines+markers",
-        hovertemplate="Mes: %{x|%Y-%m}<br>pl·m²·mes⁻¹ (sin ctrl, cap): %{y:.2f}<extra></extra>"
+        hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (sin ctrl, cap): %{y:.2f}<extra></extra>"
     ))
     fig.add_trace(go.Scatter(
-        x=mes_x, y=plm2mes_con_ctrl_cap, name="Aporte mensual (con control, cap)",
+        x=sem_x, y=plm2sem_con_ctrl_cap, name="Aporte semanal (con control, cap)",
         yaxis="y2", mode="lines+markers", line=dict(dash="dot"),
-        hovertemplate="Mes: %{x|%Y-%m}<br>pl·m²·mes⁻¹ (ctrl, cap): %{y:.2f}<extra></extra>"
+        hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (ctrl, cap): %{y:.2f}<extra></extra>"
     ))
 
-# Bandas de efecto (sobre eje temporal diario)
+# Bandas/PC y Ciec (sobre eje diario)
 def _add_label(center_ts, text, bgcolor, y=0.94):
     fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
         text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
@@ -653,28 +651,28 @@ else:
     st.info("Activa alguna intervención y define la(s) fecha(s).")
 
 # =========================== Descargas de series ======================
-with st.expander("Descargas de series (mensual)", expanded=True):
-    st.caption(conv_caption + f" · Columnas en **pl·m²·mes⁻¹** (cap A2) y acumulados (tope {MAX_PLANTS_CAP:.0f}).")
+with st.expander("Descargas de series (semanal)", expanded=True):
+    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2) y acumulados (tope {MAX_PLANTS_CAP:.0f}).")
     if factor_area_to_plants is not None:
-        out_m = df_month_cap.rename(columns={
-            "fecha": "mes",
-            "pl_sin_ctrl_cap": "plm2mes_sin_ctrl_cap",
-            "pl_con_ctrl_cap": "plm2mes_con_ctrl_cap",
-            "pl_base_cap": "plm2mes_base_cap"
+        out_w = df_week_cap.rename(columns={
+            "fecha": "semana_lunes",
+            "pl_sin_ctrl_cap": "plm2sem_sin_ctrl_cap",
+            "pl_con_ctrl_cap": "plm2sem_con_ctrl_cap",
+            "pl_base_cap": "plm2sem_base_cap"
         })
-        st.dataframe(out_m.tail(12), use_container_width=True)
-        st.download_button("Descargar serie mensual (CSV)", out_m.to_csv(index=False).encode("utf-8"),
-                           "serie_mensual_cohortes_control_cap.csv", "text/csv", key="dl_serie_mensual")
+        st.dataframe(out_w.tail(16), use_container_width=True)
+        st.download_button("Descargar serie semanal (CSV)", out_w.to_csv(index=False).encode("utf-8"),
+                           "serie_semanal_cohortes_control_cap.csv", "text/csv", key="dl_serie_semanal")
     else:
         st.info("AUC cruda = 0 → no se puede escalar a plantas·m².")
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
 if factor_area_to_plants is not None:
-    contrib_S1 = float(np.nansum(S1_pl_ctrl[mask_after_sow]))
-    contrib_S2 = float(np.nansum(S2_pl_ctrl[mask_after_sow]))
-    contrib_S3 = float(np.nansum(S3_pl_ctrl[mask_after_sow]))
-    contrib_S4 = float(np.nansum(S4_pl_ctrl[mask_after_sow]))
+    contrib_S1 = float(np.nansum(S1_pl_ctrl[mask_since_sow]))
+    contrib_S2 = float(np.nansum(S2_pl_ctrl[mask_since_sow]))
+    contrib_S3 = float(np.nansum(S3_pl_ctrl[mask_since_sow]))
+    contrib_S4 = float(np.nansum(S4_pl_ctrl[mask_since_sow]))
 else:
     contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
 
@@ -691,6 +689,72 @@ _diag = {
     "perdida_x3_pct": float(loss_x3_pct) if np.isfinite(loss_x3_pct) else None,
     "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
     "contrib_plm2_por_estado_ctrl": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
-    "unidad_salidas": "pl·m²·mes⁻¹",
+    "unidad_salidas": "pl·m²·sem⁻¹ (W-MON)",
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
+
+# ===================== Contribución por estado en Periodo Crítico =====================
+st.subheader("Contribución por estado en el Periodo Crítico (PC)")
+
+# Máscara de días dentro del PC (inclusive)
+mask_pc_days = (ts >= PC_START) & (ts <= PC_END)
+
+if factor_area_to_plants is None or not np.isfinite(factor_area_to_plants):
+    st.info("AUC cruda = 0 → no se puede escalar a plantas·m²; no es posible calcular aportes en PC.")
+else:
+    # Aportes diarios por estado YA ponderados por FC y control (S*_pl_ctrl), limitados a siembra y PC
+    mspc = (mask_since_sow & mask_pc_days).to_numpy()
+
+    contrib_pc_S1 = float(np.nansum(S1_pl_ctrl[mspc]))
+    contrib_pc_S2 = float(np.nansum(S2_pl_ctrl[mspc]))
+    contrib_pc_S3 = float(np.nansum(S3_pl_ctrl[mspc]))
+    contrib_pc_S4 = float(np.nansum(S4_pl_ctrl[mspc]))
+    total_pc = contrib_pc_S1 + contrib_pc_S2 + contrib_pc_S3 + contrib_pc_S4
+
+    df_pc = pd.DataFrame({
+        "Estado": ["S1 (FC=0.0)", "S2 (FC=0.3)", "S3 (FC=0.6)", "S4 (FC=1.0)"],
+        "pl_m2_PC": [contrib_pc_S1, contrib_pc_S2, contrib_pc_S3, contrib_pc_S4]
+    })
+    df_pc["% del total PC"] = np.where(
+        np.isfinite(total_pc) & (total_pc > 0),
+        100.0 * df_pc["pl_m2_PC"] / total_pc,
+        np.nan
+    )
+    df_pc = df_pc.sort_values("pl_m2_PC", ascending=False).reset_index(drop=True)
+
+    # Mostrar resumen
+    st.markdown(
+        f"**Ventana PC:** {PC_START.date()} → {PC_END.date()}  \n"
+        f"**Total (S1–S4) en PC:** **{total_pc:,.1f}** pl·m²"
+    )
+
+    # Tabla
+    st.dataframe(df_pc, use_container_width=True)
+
+    # Descarga CSV
+    st.download_button(
+        "Descargar aportes por estado en PC (CSV)",
+        df_pc.to_csv(index=False).encode("utf-8"),
+        "aportes_por_estado_PC.csv",
+        "text/csv",
+        key="dl_aportes_estados_pc"
+    )
+
+    # Gráfico de barras
+    fig_pc = go.Figure()
+    fig_pc.add_trace(go.Bar(
+        x=df_pc["Estado"],
+        y=df_pc["pl_m2_PC"],
+        text=(df_pc["pl_m2_PC"].round(1).astype(str) + " pl·m²"),
+        textposition="outside",
+        hovertemplate="%{x}<br>Aporte en PC: %{y:.1f} pl·m²<br>Porcentaje: %{customdata:.2f}%<extra></extra>",
+        customdata=df_pc["% del total PC"].to_numpy(),
+        name="Aporte por estado en PC"
+    ))
+    fig_pc.update_layout(
+        title="Aporte por estado (pl·m²) dentro del Periodo Crítico",
+        xaxis_title="Estado fenológico",
+        yaxis_title="Plantas·m² (acumulado en PC)",
+        margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_pc, use_container_width=True)
