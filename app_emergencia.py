@@ -515,10 +515,16 @@ else:
     S1_pl_ctrl = S2_pl_ctrl = S3_pl_ctrl = S4_pl_ctrl = np.full(len(ts), np.nan)
     plantas_supresion = plantas_supresion_ctrl = np.full(len(ts), np.nan)
 
-# ============= A2 por AUC (área) — usando “supresión” agregada =========
-emerrel_supresion_equiv = df_plot["EMERREL"].values * one_minus_Ciec  # proxy para AUC_sup comparable
+# ============= A2 por AUC (área) — usando “supresión” equivalente =========
+emerrel_supresion_equiv = df_plot["EMERREL"].values * one_minus_Ciec
 auc_sup   = auc_time(ts, emerrel_supresion_equiv, mask=mask_after_sow)
-auc_sup_ctrl = auc_time(ts, emerrel_supresion_equiv * 0 + plantas_supresion_ctrl / max(1e-12, factor_area_to_plants) if factor_area_to_plants else np.zeros_like(emerrel_supresion_equiv), mask=mask_after_sow)
+
+if factor_area_to_plants is not None:
+    # Convertimos la serie de aportes con control a "EMERREL-equivalente"
+    sup_ctrl_equiv = np.divide(plantas_supresion_ctrl, factor_area_to_plants, out=np.zeros_like(plantas_supresion_ctrl), where=(factor_area_to_plants>0))
+    auc_sup_ctrl = auc_time(ts, sup_ctrl_equiv, mask=mask_after_sow)
+else:
+    auc_sup_ctrl = 0.0
 
 if (factor_area_to_plants is not None) and (auc_cruda > 0):
     A2_sup_raw  = MAX_PLANTS_CAP * (auc_sup   / auc_cruda)
@@ -653,10 +659,12 @@ st.markdown(
 
 # ======================= Pérdida de rendimiento (%) ===================
 st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x)")
+def fmt_or_nan(v):
+    return f"{v:.2f}%" if np.isfinite(v) else "—"
 st.markdown(
     f"""
-**x₂ → pérdida:** **{(loss_x2_pct if np.isfinite(loss_x2_pct) else float('nan')):.2f}%**  
-**x₃ → pérdida:** **{(loss_x3_pct if np.isfinite(loss_x3_pct) else float('nan')):.2f}%**
+**x₂ → pérdida:** **{fmt_or_nan(loss_x2_pct)}**  
+**x₃ → pérdida:** **{fmt_or_nan(loss_x3_pct)}**
 """
 )
 
@@ -722,10 +730,7 @@ with st.expander("Descargas de series", expanded=True):
 
         auc_cum_sup  = cumulative_auc_series(ts, emerrel_supresion_equiv, mask=mask_after_sow)
         # Para el acumulado con control, convertimos plm2dia_con_ctrl a EMERREL-equivalente dividiendo por el factor
-        if factor_area_to_plants > 0:
-            sup_ctrl_equiv = plantas_supresion_ctrl / factor_area_to_plants
-        else:
-            sup_ctrl_equiv = np.zeros_like(plantas_supresion_ctrl)
+        sup_ctrl_equiv = np.divide(plantas_supresion_ctrl, factor_area_to_plants, out=np.zeros_like(plantas_supresion_ctrl), where=(factor_area_to_plants>0))
         auc_cum_ctrl = cumulative_auc_series(ts, sup_ctrl_equiv, mask=mask_after_sow)
 
         A2_cum_sup_cap  = (auc_cum_sup * factor_area_to_plants).clip(upper=MAX_PLANTS_CAP) if len(auc_cum_sup) else pd.Series(dtype=float)
@@ -734,16 +739,15 @@ with st.expander("Descargas de series", expanded=True):
         a2cum_df = pd.DataFrame({"fecha": pd.to_datetime(ts)})
         a2cum_df["A2_acum_sup_cap"] = pd.Series(A2_cum_sup_cap).reindex(a2cum_df["fecha"], method="nearest", tolerance=pd.Timedelta(days=3)).to_numpy()
         a2cum_df["A2_acum_sup_ctrl_cap"] = pd.Series(A2_cum_ctrl_cap).reindex(a2cum_df["fecha"], method="nearest", tolerance=pd.Timedelta(days=3)).to_numpy()
-    else:
-        a2cum_df = pd.DataFrame(columns=["fecha","A2_acum_sup_cap","A2_acum_sup_ctrl_cap"])
 
-    st.dataframe(out.tail(20), use_container_width=True)
-    st.download_button("Descargar serie (CSV)", out.to_csv(index=False).encode("utf-8"),
-                       "serie_cohortes_control.csv", "text/csv", key="dl_serie")
-    if len(a2cum_df):
+        st.dataframe(out.tail(20), use_container_width=True)
+        st.download_button("Descargar serie (CSV)", out.to_csv(index=False).encode("utf-8"),
+                           "serie_cohortes_control.csv", "text/csv", key="dl_serie")
         st.download_button("Descargar acumulados (CSV)",
                            a2cum_df.to_csv(index=False).encode("utf-8"),
                            "acumulados_a2_cohortes.csv", "text/csv", key="dl_a2cum")
+    else:
+        st.info("AUC cruda = 0 → no se puede escalar a plantas·m². Cargá datos válidos para habilitar descargas.")
 
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
@@ -845,4 +849,5 @@ else:
         margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_area, use_container_width=True)
+
 
