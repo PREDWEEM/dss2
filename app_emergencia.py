@@ -288,10 +288,13 @@ FC, LAI = compute_canopy(
 )
 if use_ciec:
     Ca_safe = float(Ca) if float(Ca) > 0 else 1e-6
-    Ciec = (LAI / max(1e-6, float(LAIhc))) * (float(Cs) / Ca_safe)
+    Cs_safe = float(Cs) if float(Cs) > 0 else 1e-6
+    # ⚠️ Modificación solicitada: razón Ca/Cs (antes era Cs/Ca)
+    Ciec = (LAI / max(1e-6, float(LAIhc))) * (Ca_safe / Cs_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
     Ciec = np.zeros_like(LAI, dtype=float)
+
 df_ciec = pd.DataFrame({"fecha": df_plot["fecha"], "Ciec": Ciec})
 
 # ===== Supresión (base agronómica) ===================================
