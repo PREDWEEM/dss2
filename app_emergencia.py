@@ -9,7 +9,8 @@
 # - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra (t=0)
 # - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable)
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
-# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas ISO iniciando lunes). Cap A2 estricto.
+# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto.
+# - ▶ Reescalado proporcional por estado para conservar pesos relativos bajo cap A2.
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -20,10 +21,10 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2 · Salidas semanales"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2 · Semanal"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("AUC(EMERREL cruda) ≙ tope A2 (850/500/250/100 pl·m²). Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2, computando desde siembra (t=0).")
+st.caption("AUC(EMERREL cruda) ≙ tope A2 (850/500/250/100 pl·m²). Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2 y reescalado proporcional por estado, computando desde siembra (t=0).")
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10
@@ -256,7 +257,7 @@ one_minus_Ciec = np.clip((1.0 - Ciec).astype(float), 0.0, 1.0)
 
 # ===================== Cohortes S1..S4 (edad desde emergencia) =====================
 ts = pd.to_datetime(df_plot["fecha"])
-mask_since_sow = (ts.dt.date >= sow_date)  # <<<<< Solo desde siembra (t=0)
+mask_since_sow = (ts.dt.date >= sow_date)  # Solo desde siembra (t=0)
 
 births = df_plot["EMERREL"].astype(float).to_numpy()
 births = np.clip(births, 0.0, None)
@@ -454,6 +455,22 @@ else:
     base_pl_daily = base_pl_daily_cap = np.full(len(ts), np.nan)
     plantas_supresion_cap = plantas_supresion_ctrl_cap = np.full(len(ts), np.nan)
 
+# ========= CAP A2 CONSISTENTE POR ESTADO (reescalado proporcional por día) =========
+# Conserva pesos relativos diarios S1..S4 y garantiza suma ≤ cap
+if factor_area_to_plants is not None:
+    total_ctrl_daily = (S1_pl_ctrl + S2_pl_ctrl + S3_pl_ctrl + S4_pl_ctrl)
+    eps = 1e-12
+    scale = np.where(total_ctrl_daily > eps,
+                     np.minimum(1.0, plantas_supresion_ctrl_cap / total_ctrl_daily),
+                     0.0)
+    S1_pl_ctrl_cap = S1_pl_ctrl * scale
+    S2_pl_ctrl_cap = S2_pl_ctrl * scale
+    S3_pl_ctrl_cap = S3_pl_ctrl * scale
+    S4_pl_ctrl_cap = S4_pl_ctrl * scale
+    plantas_supresion_ctrl_cap = S1_pl_ctrl_cap + S2_pl_ctrl_cap + S3_pl_ctrl_cap + S4_pl_ctrl_cap
+else:
+    S1_pl_ctrl_cap = S2_pl_ctrl_cap = S3_pl_ctrl_cap = S4_pl_ctrl_cap = np.full(len(ts), np.nan)
+
 # ============ Agregación SEMANAL (pl·m²·sem⁻¹, semanas ISO Lunes) ============
 df_daily_cap = pd.DataFrame({
     "fecha": pd.to_datetime(ts),
@@ -464,11 +481,11 @@ df_daily_cap = pd.DataFrame({
 df_week_cap = (
     df_daily_cap
     .set_index("fecha")
-    .resample("W-MON")  # semana que cierra LUNES (W-MON: etiqueta = lunes)
+    .resample("W-MON")  # etiqueta = lunes
     .sum()
     .reset_index()
 )
-sem_x = df_week_cap["fecha"]  # marca el LUNES de cada semana agregada
+sem_x = df_week_cap["fecha"]  # Lunes de cada semana agregada
 plm2sem_sin_ctrl_cap = df_week_cap["pl_sin_ctrl_cap"].to_numpy()
 plm2sem_con_ctrl_cap = df_week_cap["pl_con_ctrl_cap"].to_numpy()
 plm2sem_base_cap     = df_week_cap["pl_base_cap"].to_numpy()
@@ -669,10 +686,10 @@ with st.expander("Descargas de series (semanal)", expanded=True):
 # ============================== Diagnóstico ===========================
 st.subheader("Diagnóstico")
 if factor_area_to_plants is not None:
-    contrib_S1 = float(np.nansum(S1_pl_ctrl[mask_since_sow]))
-    contrib_S2 = float(np.nansum(S2_pl_ctrl[mask_since_sow]))
-    contrib_S3 = float(np.nansum(S3_pl_ctrl[mask_since_sow]))
-    contrib_S4 = float(np.nansum(S4_pl_ctrl[mask_since_sow]))
+    contrib_S1 = float(np.nansum(S1_pl_ctrl_cap[mask_since_sow]))
+    contrib_S2 = float(np.nansum(S2_pl_ctrl_cap[mask_since_sow]))
+    contrib_S3 = float(np.nansum(S3_pl_ctrl_cap[mask_since_sow]))
+    contrib_S4 = float(np.nansum(S4_pl_ctrl_cap[mask_since_sow]))
 else:
     contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
 
@@ -688,14 +705,13 @@ _diag = {
     "perdida_x2_pct": float(loss_x2_pct) if np.isfinite(loss_x2_pct) else None,
     "perdida_x3_pct": float(loss_x3_pct) if np.isfinite(loss_x3_pct) else None,
     "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
-    "contrib_plm2_por_estado_ctrl": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
+    "contrib_plm2_por_estado_ctrl_cap": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
     "unidad_salidas": "pl·m²·sem⁻¹ (W-MON)",
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
-# ===================== Composición porcentual por estado en Periodo Crítico =====================
+# ===================== Composición porcentual por estado en PC =====================
 st.subheader("Composición porcentual por estado en el Periodo Crítico (PC)")
-
 mask_pc_days = (ts >= PC_START) & (ts <= PC_END)
 
 if factor_area_to_plants is None or not np.isfinite(factor_area_to_plants):
@@ -703,21 +719,17 @@ if factor_area_to_plants is None or not np.isfinite(factor_area_to_plants):
 else:
     mspc = (mask_since_sow & mask_pc_days).to_numpy()
 
-    # Aportes absolutos (pl·m²) ya ponderados por FC y control
-    a_S1 = float(np.nansum(S1_pl_ctrl[mspc]))
-    a_S2 = float(np.nansum(S2_pl_ctrl[mspc]))
-    a_S3 = float(np.nansum(S3_pl_ctrl[mspc]))
-    a_S4 = float(np.nansum(S4_pl_ctrl[mspc]))
+    # Aportes absolutos (pl·m²) por estado, ya CAPEADOS proporcionalmente
+    a_S1 = float(np.nansum(S1_pl_ctrl_cap[mspc]))
+    a_S2 = float(np.nansum(S2_pl_ctrl_cap[mspc]))
+    a_S3 = float(np.nansum(S3_pl_ctrl_cap[mspc]))
+    a_S4 = float(np.nansum(S4_pl_ctrl_cap[mspc]))
     tot  = a_S1 + a_S2 + a_S3 + a_S4
 
     labels = ["S1 (FC=0.0)", "S2 (FC=0.3)", "S3 (FC=0.6)", "S4 (FC=1.0)"]
     absolutos = np.array([a_S1, a_S2, a_S3, a_S4], dtype=float)
 
-    # --- % composición (maneja tot=0) ---
-    if np.isfinite(tot) and tot > 0:
-        pct = 100.0 * absolutos / tot
-    else:
-        pct = np.full_like(absolutos, np.nan)
+    pct = (100.0 * absolutos / tot) if (np.isfinite(tot) and tot > 0) else np.array([np.nan, np.nan, np.nan, np.nan])
 
     df_pc_pct = pd.DataFrame({
         "Estado": labels,
@@ -729,10 +741,8 @@ else:
         f"**Total (S1–S4) en PC:** **{tot:,.1f}** pl·m²"
     )
 
-    # Tabla SOLO en %
     st.dataframe(df_pc_pct, use_container_width=True)
 
-    # Descarga en %
     st.download_button(
         "Descargar composición porcentual en PC (CSV)",
         df_pc_pct.to_csv(index=False).encode("utf-8"),
@@ -741,36 +751,19 @@ else:
         key="dl_pct_estados_pc"
     )
 
-    # ---- Barra 100% apilada ----
+    # Barra 100% apilada (hovertemplate sin f-strings para %{y})
     fig_pc_stack = go.Figure()
-    # para barra 100%, graficamos una sola barra con 4 segmentos proporcionales
-    fig_pc_stack.add_trace(go.Bar(
-        x=["PC"],
-        y=[pct[0]],
-        name=labels[0],
-        hovertemplate=f"{labels[0]}<br>%: %{y:.2f}<extra></extra>"
-    ))
-    fig_pc_stack.add_trace(go.Bar(
-        x=["PC"],
-        y=[pct[1]],
-        name=labels[1],
-        hovertemplate=f"{labels[1]}<br>%: %{y:.2f}<extra></extra>"
-    ))
-    fig_pc_stack.add_trace(go.Bar(
-        x=["PC"],
-        y=[pct[2]],
-        name=labels[2],
-        hovertemplate=f"{labels[2]}<br>%: %{y:.2f}<extra></extra>"
-    ))
-    fig_pc_stack.add_trace(go.Bar(
-        x=["PC"],
-        y=[pct[3]],
-        name=labels[3],
-        hovertemplate=f"{labels[3]}<br>%: %{y:.2f}<extra></extra>"
-    ))
+    fig_pc_stack.add_trace(go.Bar(x=["PC"], y=[pct[0]], name=labels[0],
+                                  hovertemplate=labels[0] + "<br>%: %{y:.2f}<extra></extra>"))
+    fig_pc_stack.add_trace(go.Bar(x=["PC"], y=[pct[1]], name=labels[1],
+                                  hovertemplate=labels[1] + "<br>%: %{y:.2f}<extra></extra>"))
+    fig_pc_stack.add_trace(go.Bar(x=["PC"], y=[pct[2]], name=labels[2],
+                                  hovertemplate=labels[2] + "<br>%: %{y:.2f}<extra></extra>"))
+    fig_pc_stack.add_trace(go.Bar(x=["PC"], y=[pct[3]], name=labels[3],
+                                  hovertemplate=labels[3] + "<br>%: %{y:.2f}<extra></extra>"))
     fig_pc_stack.update_layout(
         barmode="stack",
-        barnorm="percent",  # asegura 100%
+        barnorm="percent",
         title="Composición porcentual por estado en el Periodo Crítico (barra 100%)",
         xaxis_title="Periodo Crítico",
         yaxis_title="Porcentaje (%)",
@@ -778,7 +771,7 @@ else:
     )
     st.plotly_chart(fig_pc_stack, use_container_width=True)
 
-    # ---- Donut ----
+    # Donut
     fig_pc_donut = go.Figure(data=[go.Pie(
         labels=labels,
         values=pct,
@@ -791,4 +784,3 @@ else:
         margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_pc_donut, use_container_width=True)
-
