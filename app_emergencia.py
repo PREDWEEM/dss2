@@ -326,27 +326,17 @@ fechas_series = ts.dt.date.values
 # Edad medida desde la fecha de siembra (tiempo 0)
 age_since_sow = np.array([(d - sow_date).days for d in fechas_series], dtype=float)
 
-# Reglas por edad desde siembra
+# Reglas por edad desde siembra (S1 = 1–6 días de emergidas)
+mask_S1 = (age_since_sow >= 1)  & (age_since_sow <= 6)
 mask_S2 = (age_since_sow >= 7)  & (age_since_sow <= 27)
 mask_S3 = (age_since_sow >= 28) & (age_since_sow <= 59)
 mask_S4 = (age_since_sow >= 60)
-mask_S1 = ~(mask_S2 | mask_S3 | mask_S4)
 
 # FC por estado (S1=0.0, S2=0.3, S3=0.6, S4=1.0)
 FC_state = np.zeros_like(age_since_sow, dtype=float)  # S1=0.0
 FC_state[mask_S2] = 0.3
 FC_state[mask_S3] = 0.6
 FC_state[mask_S4] = 1.0
-
-# --- Helper: máscara por estados elegidos ---
-def state_mask_from_selection(sel_labels):
-    sel = set(sel_labels or [])
-    m = np.zeros_like(mask_S1, dtype=float)
-    if "S1" in sel: m = m + mask_S1.astype(float)
-    if "S2" in sel: m = m + mask_S2.astype(float)
-    if "S3" in sel: m = m + mask_S3.astype(float)
-    if "S4" in sel: m = m + mask_S4.astype(float)
-    return np.clip(m, 0.0, 1.0)
 
 # =================== Manejo (control) y decaimientos ===================
 sched_rows = []
