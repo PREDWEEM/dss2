@@ -693,68 +693,102 @@ _diag = {
 }
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
-# ===================== Contribución por estado en Periodo Crítico =====================
-st.subheader("Contribución por estado en el Periodo Crítico (PC)")
+# ===================== Composición porcentual por estado en Periodo Crítico =====================
+st.subheader("Composición porcentual por estado en el Periodo Crítico (PC)")
 
-# Máscara de días dentro del PC (inclusive)
 mask_pc_days = (ts >= PC_START) & (ts <= PC_END)
 
 if factor_area_to_plants is None or not np.isfinite(factor_area_to_plants):
     st.info("AUC cruda = 0 → no se puede escalar a plantas·m²; no es posible calcular aportes en PC.")
 else:
-    # Aportes diarios por estado YA ponderados por FC y control (S*_pl_ctrl), limitados a siembra y PC
     mspc = (mask_since_sow & mask_pc_days).to_numpy()
 
-    contrib_pc_S1 = float(np.nansum(S1_pl_ctrl[mspc]))
-    contrib_pc_S2 = float(np.nansum(S2_pl_ctrl[mspc]))
-    contrib_pc_S3 = float(np.nansum(S3_pl_ctrl[mspc]))
-    contrib_pc_S4 = float(np.nansum(S4_pl_ctrl[mspc]))
-    total_pc = contrib_pc_S1 + contrib_pc_S2 + contrib_pc_S3 + contrib_pc_S4
+    # Aportes absolutos (pl·m²) ya ponderados por FC y control
+    a_S1 = float(np.nansum(S1_pl_ctrl[mspc]))
+    a_S2 = float(np.nansum(S2_pl_ctrl[mspc]))
+    a_S3 = float(np.nansum(S3_pl_ctrl[mspc]))
+    a_S4 = float(np.nansum(S4_pl_ctrl[mspc]))
+    tot  = a_S1 + a_S2 + a_S3 + a_S4
 
-    df_pc = pd.DataFrame({
-        "Estado": ["S1 (FC=0.0)", "S2 (FC=0.3)", "S3 (FC=0.6)", "S4 (FC=1.0)"],
-        "pl_m2_PC": [contrib_pc_S1, contrib_pc_S2, contrib_pc_S3, contrib_pc_S4]
-    })
-    df_pc["% del total PC"] = np.where(
-        np.isfinite(total_pc) & (total_pc > 0),
-        100.0 * df_pc["pl_m2_PC"] / total_pc,
-        np.nan
-    )
-    df_pc = df_pc.sort_values("pl_m2_PC", ascending=False).reset_index(drop=True)
+    labels = ["S1 (FC=0.0)", "S2 (FC=0.3)", "S3 (FC=0.6)", "S4 (FC=1.0)"]
+    absolutos = np.array([a_S1, a_S2, a_S3, a_S4], dtype=float)
 
-    # Mostrar resumen
+    # --- % composición (maneja tot=0) ---
+    if np.isfinite(tot) and tot > 0:
+        pct = 100.0 * absolutos / tot
+    else:
+        pct = np.full_like(absolutos, np.nan)
+
+    df_pc_pct = pd.DataFrame({
+        "Estado": labels,
+        "% del total PC": pct
+    }).sort_values("% del total PC", ascending=False).reset_index(drop=True)
+
     st.markdown(
         f"**Ventana PC:** {PC_START.date()} → {PC_END.date()}  \n"
-        f"**Total (S1–S4) en PC:** **{total_pc:,.1f}** pl·m²"
+        f"**Total (S1–S4) en PC:** **{tot:,.1f}** pl·m²"
     )
 
-    # Tabla
-    st.dataframe(df_pc, use_container_width=True)
+    # Tabla SOLO en %
+    st.dataframe(df_pc_pct, use_container_width=True)
 
-    # Descarga CSV
+    # Descarga en %
     st.download_button(
-        "Descargar aportes por estado en PC (CSV)",
-        df_pc.to_csv(index=False).encode("utf-8"),
-        "aportes_por_estado_PC.csv",
+        "Descargar composición porcentual en PC (CSV)",
+        df_pc_pct.to_csv(index=False).encode("utf-8"),
+        "composicion_porcentual_estados_PC.csv",
         "text/csv",
-        key="dl_aportes_estados_pc"
+        key="dl_pct_estados_pc"
     )
 
-    # Gráfico de barras
-    fig_pc = go.Figure()
-    fig_pc.add_trace(go.Bar(
-        x=df_pc["Estado"],
-        y=df_pc["pl_m2_PC"],
-        text=(df_pc["pl_m2_PC"].round(1).astype(str) + " pl·m²"),
-        textposition="outside",
-        hovertemplate="%{x}<br>Aporte en PC: %{y:.1f} pl·m²<br>Porcentaje: %{customdata:.2f}%<extra></extra>",
-        customdata=df_pc["% del total PC"].to_numpy(),
-        name="Aporte por estado en PC"
+    # ---- Barra 100% apilada ----
+    fig_pc_stack = go.Figure()
+    # para barra 100%, graficamos una sola barra con 4 segmentos proporcionales
+    fig_pc_stack.add_trace(go.Bar(
+        x=["PC"],
+        y=[pct[0]],
+        name=labels[0],
+        hovertemplate=f"{labels[0]}<br>%: %{y:.2f}<extra></extra>"
     ))
-    fig_pc.update_layout(
-        title="Aporte por estado (pl·m²) dentro del Periodo Crítico",
-        xaxis_title="Estado fenológico",
-        yaxis_title="Plantas·m² (acumulado en PC)",
+    fig_pc_stack.add_trace(go.Bar(
+        x=["PC"],
+        y=[pct[1]],
+        name=labels[1],
+        hovertemplate=f"{labels[1]}<br>%: %{y:.2f}<extra></extra>"
+    ))
+    fig_pc_stack.add_trace(go.Bar(
+        x=["PC"],
+        y=[pct[2]],
+        name=labels[2],
+        hovertemplate=f"{labels[2]}<br>%: %{y:.2f}<extra></extra>"
+    ))
+    fig_pc_stack.add_trace(go.Bar(
+        x=["PC"],
+        y=[pct[3]],
+        name=labels[3],
+        hovertemplate=f"{labels[3]}<br>%: %{y:.2f}<extra></extra>"
+    ))
+    fig_pc_stack.update_layout(
+        barmode="stack",
+        barnorm="percent",  # asegura 100%
+        title="Composición porcentual por estado en el Periodo Crítico (barra 100%)",
+        xaxis_title="Periodo Crítico",
+        yaxis_title="Porcentaje (%)",
         margin=dict(l=10, r=10, t=50, b=10)
     )
-    st.plotly_chart(fig_pc, use_container_width=True)
+    st.plotly_chart(fig_pc_stack, use_container_width=True)
+
+    # ---- Donut ----
+    fig_pc_donut = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=pct,
+        hole=0.5,
+        textinfo="label+percent",
+        hovertemplate="%{label}<br>%: %{value:.2f}%<extra></extra>"
+    )])
+    fig_pc_donut.update_layout(
+        title="Composición porcentual por estado en el Periodo Crítico (donut)",
+        margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_pc_donut, use_container_width=True)
+
