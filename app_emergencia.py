@@ -5,10 +5,10 @@
 # - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (850/500/250/100 pl·m²)
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
-# - Fenología (Avena fatua) con FC fijos: S1=0.0, S2=0.3, S3=0.6, S4=1.0
-#   Asignación por **edad desde siembra (t=0)** con bordes: S2=7–27d; S3=28–59d; S4=≥60d; S1=resto
+# - Fenología (Avena fatua) con FC fijos: S1=0.0 (1–6 dds), S2=0.3 (7–27), S3=0.6 (28–59), S4=1.0 (≥60)
+#   Asignación por **edad desde siembra (t=0)**. Transiciones solo hacia adelante (no se clasifica antes de siembra).
 # - x = ∫ (pl·m²·día⁻¹_ctrl × FC_estado_desde_siembra) dt, desde siembra
-# - Ahora: **cada tratamiento** permite elegir **qué estados S1–S4** afecta.
+# - Cada tratamiento permite elegir qué estados S1–S4 afecta.
 # - Graminicida post = día de aplicación + 10 días hacia adelante (11 días totales por convención)
 
 import io, re, json, math, datetime as dt
@@ -290,7 +290,7 @@ FC, LAI = compute_canopy(
 if use_ciec:
     Ca_safe = float(Ca) if float(Ca) > 0 else 1e-6
     Cs_safe = float(Cs) if float(Cs) > 0 else 1e-6
-    # ⚠️ Razón Ca/Cs (modificada según pedido)
+    # ⚠️ Razón Ca/Cs (modificada)
     Ciec = (LAI / max(1e-6, float(LAIhc))) * (Ca_safe / Cs_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
@@ -320,23 +320,43 @@ else:
 # ===================== Fenología S1..S4 (FC fijos) ====================
 with st.sidebar:
     st.header("Fenología de la maleza (Avena fatua)")
-    st.caption("FC fijos por estado: S1=0.0, S2=0.3, S3=0.6, S4=1.0. Asignación por edad desde siembra (t=0).")
+    st.caption("FC fijos: S1=0.0 (1–6 dds), S2=0.3 (7–27), S3=0.6 (28–59), S4=1.0 (≥60). Edad desde siembra (t=0).")
 
 fechas_series = ts.dt.date.values
-# Edad medida desde la fecha de siembra (tiempo 0)
-age_since_sow = np.array([(d - sow_date).days for d in fechas_series], dtype=float)
+
+# Edad cruda (puede ser negativa antes de siembra)
+age_days_raw = np.array([(d - sow_date).days for d in fechas_series], dtype=float)
+
+# ⚠️ Transiciones solo hacia adelante: no clasificar hacia atrás.
+# Clamp a [0, ∞) para la lógica de estados y, además, marcar días válidos desde siembra.
+age_days = np.maximum(0.0, age_days_raw)
+valid_since_sow = (age_days_raw >= 0)
 
 # Reglas por edad desde siembra (S1 = 1–6 días de emergidas)
-mask_S1 = (age_since_sow >= 1)  & (age_since_sow <= 6)
-mask_S2 = (age_since_sow >= 7)  & (age_since_sow <= 27)
-mask_S3 = (age_since_sow >= 28) & (age_since_sow <= 59)
-mask_S4 = (age_since_sow >= 60)
+mask_S1 = valid_since_sow & (age_days >= 1)  & (age_days <= 6)
+mask_S2 = valid_since_sow & (age_days >= 7)  & (age_days <= 27)
+mask_S3 = valid_since_sow & (age_days >= 28) & (age_days <= 59)
+mask_S4 = valid_since_sow & (age_days >= 60)
 
 # FC por estado (S1=0.0, S2=0.3, S3=0.6, S4=1.0)
-FC_state = np.zeros_like(age_since_sow, dtype=float)  # S1=0.0
+FC_state = np.zeros_like(age_days, dtype=float)  # S1=0.0 (explícito)
 FC_state[mask_S2] = 0.3
 FC_state[mask_S3] = 0.6
 FC_state[mask_S4] = 1.0
+
+# --- Helper: máscara por estados elegidos (debe existir antes de apply_efficiency_masked) ---
+def state_mask_from_selection(sel_labels):
+    """
+    Devuelve un vector 0/1 del mismo largo que la serie temporal,
+    activando los días incluidos en los estados seleccionados, SOLO desde siembra (t>=0).
+    """
+    sel = set(sel_labels or [])
+    m = np.zeros_like(FC_state, dtype=float)
+    if "S1" in sel: m += mask_S1.astype(float)
+    if "S2" in sel: m += mask_S2.astype(float)
+    if "S3" in sel: m += mask_S3.astype(float)
+    if "S4" in sel: m += mask_S4.astype(float)
+    return np.clip(m, 0.0, 1.0)
 
 # =================== Manejo (control) y decaimientos ===================
 sched_rows = []
@@ -468,10 +488,10 @@ def weights_residual(start_date, dias):
 ctrl_factor = np.ones_like(fechas_d, dtype=float)
 
 def apply_efficiency_masked(weights, eff_pct, states_sel):
-    """Aplica reducción (1 - eff) sobre ctrl_factor, limitada a estados elegidos."""
+    """Aplica reducción (1 - eff) sobre ctrl_factor, limitada a estados elegidos (y solo t>=0)."""
     if eff_pct <= 0:
         return
-    state_mask = state_mask_from_selection(states_sel)  # 0/1 por día según edad desde siembra
+    state_mask = state_mask_from_selection(states_sel)  # 0/1 por día desde siembra
     w = np.clip(weights, 0.0, 1.0) * state_mask
     reduc = np.clip(1.0 - (eff_pct/100.0) * w, 0.0, 1.0)
     np.multiply(ctrl_factor, reduc, out=ctrl_factor)
@@ -774,13 +794,13 @@ with st.expander("Descargas de series", expanded=True):
 
         if len(ts):
             a2cum_df = pd.DataFrame({"fecha": pd.to_datetime(ts)})
-            if len(A2_cum_sup_cap):
+            if 'A2_cum_sup_cap' in locals() and len(A2_cum_sup_cap):
                 a2cum_df["A2_acum_sup_cap"] = pd.Series(A2_cum_sup_cap).reindex(
                     a2cum_df["fecha"], method="nearest", tolerance=pd.Timedelta(days=3)
                 ).to_numpy()
             else:
                 a2cum_df["A2_acum_sup_cap"] = np.nan
-            if len(A2_cum_ctrl_cap):
+            if 'A2_cum_ctrl_cap' in locals() and len(A2_cum_ctrl_cap):
                 a2cum_df["A2_acum_sup_ctrl_cap"] = pd.Series(A2_cum_ctrl_cap).reindex(
                     a2cum_df["fecha"], method="nearest", tolerance=pd.Timedelta(days=3)
                 ).to_numpy()
@@ -800,7 +820,7 @@ with st.expander("Descargas de series", expanded=True):
     st.download_button("Descargar serie procesada (CSV)",
                        out_show.to_csv(index=False).encode("utf-8"),
                        "serie_procesada_auc_fenologia.csv", "text/csv", key="dl_serie")
-    if len(a2cum_df):
+    if 'a2cum_df' in locals() and len(a2cum_df):
         st.download_button("Descargar acumulados (CSV)",
                            a2cum_df.to_csv(index=False).encode("utf-8"),
                            "acumulados_a2_x.csv", "text/csv", key="dl_a2cum")
@@ -832,14 +852,14 @@ _diag = {
     "A2_sup_cap": float(A2_sup_final) if (factor_area_to_plants is not None and np.isfinite(A2_sup_final)) else None,
     "A2_ctrl_cap": float(A2_ctrl_final) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_final)) else None,
     "X_eff_desde_siembra": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
-    # Fenología por edad desde siembra
-    "reglas_fenologia_por_edad_desde_siembra": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
+    # Fenología por edad desde siembra (transiciones hacia adelante)
+    "reglas_fenologia_por_edad_desde_siembra": {"S1": "1–6", "S2": "7–27", "S3": "28–59", "S4": "≥60"},
     "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
     "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
     # Manejo
     "decaimiento": decaimiento_tipo,
 }
-# Si usaste selección de estados por tratamiento, agregá qué estados fueron seleccionados
+# Estados por tratamiento (si existen)
 if 'states_glifo' in locals() or 'states_gram' in locals():
     _diag["estados_por_tratamiento"] = {
         "glifosato_pre": states_glifo if 'states_glifo' in locals() else None,
@@ -857,7 +877,6 @@ st.subheader("Contribución de plantas por estado (S1..S4)")
 if (factor_area_to_plants is None) or (not np.isfinite(factor_area_to_plants)):
     st.info("Para ver contribuciones por estado necesitás que la escala por AUC esté activa (AUC cruda > 0).")
 else:
-    # --- Totales por estado ---
     contrib_dict = {
         "S1 (FC=0.0)": contrib_S1,
         "S2 (FC=0.3)": contrib_S2,
@@ -875,7 +894,7 @@ else:
         np.nan
     )
 
-    # --- (1) Gráfico de barras ---
+    # Barras
     fig_bar = go.Figure()
     fig_bar.add_trace(go.Bar(
         x=df_contrib["Estado"],
@@ -888,31 +907,26 @@ else:
     ))
     fig_bar.update_layout(
         title="Aporte total por estado (pl·m²) — desde siembra",
-        xaxis_title="Estado fenológico (reglas por edad desde siembra)",
+        xaxis_title="Estado fenológico (edad desde siembra)",
         yaxis_title="Plantas·m² (acumulado)",
         margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
-    # --- (2) Serie temporal apilada ---
-    # plm2dia_ctrl_eff ya viene calculada como: plantas_supresion_ctrl * FC_state
+    # Área apilada
     s1 = np.where(mask_S1 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s2 = np.where(mask_S2 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s3 = np.where(mask_S3 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s4 = np.where(mask_S4 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
 
     fig_area = go.Figure()
-    fig_area.add_trace(go.Scatter(x=ts, y=s1, name="S1 (FC=0.0)", mode="lines",
-                                  stackgroup="one",
+    fig_area.add_trace(go.Scatter(x=ts, y=s1, name="S1 (FC=0.0)", mode="lines", stackgroup="one",
                                   hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S1: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
-    fig_area.add_trace(go.Scatter(x=ts, y=s2, name="S2 (FC=0.3)", mode="lines",
-                                  stackgroup="one",
+    fig_area.add_trace(go.Scatter(x=ts, y=s2, name="S2 (FC=0.3)", mode="lines", stackgroup="one",
                                   hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S2: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
-    fig_area.add_trace(go.Scatter(x=ts, y=s3, name="S3 (FC=0.6)", mode="lines",
-                                  stackgroup="one",
+    fig_area.add_trace(go.Scatter(x=ts, y=s3, name="S3 (FC=0.6)", mode="lines", stackgroup="one",
                                   hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S3: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
-    fig_area.add_trace(go.Scatter(x=ts, y=s4, name="S4 (FC=1.0)", mode="lines",
-                                  stackgroup="one",
+    fig_area.add_trace(go.Scatter(x=ts, y=s4, name="S4 (FC=1.0)", mode="lines", stackgroup="one",
                                   hovertemplate="Fecha: %{x|%Y-%m-%d}<br>S4: %{y:.2f} pl·m²·día⁻¹<extra></extra>"))
     fig_area.update_layout(
         title="Serie temporal apilada — Contribución diaria por estado (pl·m²·día⁻¹)",
@@ -922,7 +936,7 @@ else:
     )
     st.plotly_chart(fig_area, use_container_width=True)
 
-    # --- (3) Tabla y descarga ---
+    # Tabla + descarga
     st.markdown("**Totales** desde siembra (cap en x = tope A2):")
     st.dataframe(df_contrib, use_container_width=True)
     st.download_button(
