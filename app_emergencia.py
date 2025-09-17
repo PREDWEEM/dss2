@@ -6,8 +6,8 @@
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
 # - Fenología (Avena fatua) con FC fijos: S1=0.0, S2=0.3, S3=0.6, S4=1.0
-#   Asignación por **edad al PC** con bordes: S2=7–27d; S3=28–59d; S4=≥60d; S1=resto
-# - x = ∫ (pl·m²·día⁻¹_ctrl × FC_estado_en_PC) dt, desde siembra
+#   Asignación por **edad desde siembra (t=0)** con bordes: S2=7–27d; S3=28–59d; S4=≥60d; S1=resto
+# - x = ∫ (pl·m²·día⁻¹_ctrl × FC_estado_desde_siembra) dt, desde siembra
 # - Ahora: **cada tratamiento** permite elegir **qué estados S1–S4** afecta.
 # - Graminicida post = día de aplicación + 10 días hacia adelante (11 días totales por convención)
 
@@ -185,6 +185,7 @@ except (URLError, HTTPError) as e:
 except Exception as e:
     st.error(f"No se pudo leer el CSV: {e}"); st.stop()
 
+# (Oculto por pedido)
 # st.subheader("Vista previa (primeras 15 filas del CSV)")
 # st.dataframe(df0.head(15), use_container_width=True)
 
@@ -289,7 +290,7 @@ FC, LAI = compute_canopy(
 if use_ciec:
     Ca_safe = float(Ca) if float(Ca) > 0 else 1e-6
     Cs_safe = float(Cs) if float(Cs) > 0 else 1e-6
-    # ⚠️ Modificación solicitada: razón Ca/Cs (antes era Cs/Ca)
+    # ⚠️ Razón Ca/Cs (modificada según pedido)
     Ciec = (LAI / max(1e-6, float(LAIhc))) * (Ca_safe / Cs_safe)
     Ciec = np.clip(Ciec, 0.0, 1.0)
 else:
@@ -319,16 +320,20 @@ else:
 # ===================== Fenología S1..S4 (FC fijos) ====================
 with st.sidebar:
     st.header("Fenología de la maleza (Avena fatua)")
-    st.caption("FC fijos por estado: S1=0.0, S2=0.3, S3=0.6, S4=1.0. Asignación por edad al PC.")
+    st.caption("FC fijos por estado: S1=0.0, S2=0.3, S3=0.6, S4=1.0. Asignación por edad desde siembra (t=0).")
 
 fechas_series = ts.dt.date.values
-age_at_pc = np.array([(PC_REF.date() - d).days for d in fechas_series], dtype=float)
-mask_S2 = (age_at_pc >= 7)  & (age_at_pc <= 27)
-mask_S3 = (age_at_pc >= 28) & (age_at_pc <= 59)
-mask_S4 = (age_at_pc >= 60)
+# Edad medida desde la fecha de siembra (tiempo 0)
+age_since_sow = np.array([(d - sow_date).days for d in fechas_series], dtype=float)
+
+# Reglas por edad desde siembra
+mask_S2 = (age_since_sow >= 7)  & (age_since_sow <= 27)
+mask_S3 = (age_since_sow >= 28) & (age_since_sow <= 59)
+mask_S4 = (age_since_sow >= 60)
 mask_S1 = ~(mask_S2 | mask_S3 | mask_S4)
 
-FC_state = np.zeros_like(age_at_pc, dtype=float)  # S1=0.0
+# FC por estado (S1=0.0, S2=0.3, S3=0.6, S4=1.0)
+FC_state = np.zeros_like(age_since_sow, dtype=float)  # S1=0.0
 FC_state[mask_S2] = 0.3
 FC_state[mask_S3] = 0.6
 FC_state[mask_S4] = 1.0
@@ -476,7 +481,7 @@ def apply_efficiency_masked(weights, eff_pct, states_sel):
     """Aplica reducción (1 - eff) sobre ctrl_factor, limitada a estados elegidos."""
     if eff_pct <= 0:
         return
-    state_mask = state_mask_from_selection(states_sel)  # 0/1 por día según edad al PC
+    state_mask = state_mask_from_selection(states_sel)  # 0/1 por día según edad desde siembra
     w = np.clip(weights, 0.0, 1.0) * state_mask
     reduc = np.clip(1.0 - (eff_pct/100.0) * w, 0.0, 1.0)
     np.multiply(ctrl_factor, reduc, out=ctrl_factor)
@@ -683,7 +688,7 @@ else:
     X_eff_pc = float("nan")
 
 st.subheader("Plantas·m² que escapan — Área bajo la curva (AUC) con tope")
-st.markdown(f"**x — Densidad efectiva (edad en PC):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_")
+st.markdown(f"**x — Densidad efectiva (edad desde siembra):** **{X_eff_pc:,.1f}** pl·m² _(tope {MAX_PLANTS_CAP:.0f})_")
 
 # ======================= Pérdida de rendimiento (%) ===================
 def perdida_rinde_pct(x):
@@ -836,9 +841,9 @@ _diag = {
     "A2_ctrl_raw_por_AUC": float(A2_ctrl_raw) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_raw)) else None,
     "A2_sup_cap": float(A2_sup_final) if (factor_area_to_plants is not None and np.isfinite(A2_sup_final)) else None,
     "A2_ctrl_cap": float(A2_ctrl_final) if (factor_area_to_plants is not None and np.isfinite(A2_ctrl_final)) else None,
-    "X_eff_pc": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
-    # Fenología por edad en PC
-    "reglas_fenologia_por_edad_PC": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
+    "X_eff_desde_siembra": float(X_eff_pc) if (factor_area_to_plants is not None and np.isfinite(X_eff_pc)) else None,
+    # Fenología por edad desde siembra
+    "reglas_fenologia_por_edad_desde_siembra": {"S2": "7–27", "S3": "28–59", "S4": "≥60", "S1": "resto"},
     "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
     "contrib_plm2_por_estado": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
     # Manejo
@@ -893,14 +898,14 @@ else:
     ))
     fig_bar.update_layout(
         title="Aporte total por estado (pl·m²) — desde siembra",
-        xaxis_title="Estado fenológico (reglas por edad al PC)",
+        xaxis_title="Estado fenológico (reglas por edad desde siembra)",
         yaxis_title="Plantas·m² (acumulado)",
         margin=dict(l=10, r=10, t=50, b=10)
     )
     st.plotly_chart(fig_bar, use_container_width=True)
 
     # --- (2) Serie temporal apilada ---
-    # plm2dia_ctrl_eff ya debe venir calculada como: plantas_supresion_ctrl * FC_state
+    # plm2dia_ctrl_eff ya viene calculada como: plantas_supresion_ctrl * FC_state
     s1 = np.where(mask_S1 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s2 = np.where(mask_S2 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
     s3 = np.where(mask_S3 & mask_after_sow, plm2dia_ctrl_eff, 0.0)
