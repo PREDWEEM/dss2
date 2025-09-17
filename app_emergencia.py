@@ -442,11 +442,13 @@ if decaimiento_tipo != "Exponencial":
 # =================== Estados objetivo por tratamiento ==================
 with st.sidebar:
     st.header("Estados objetivo por tratamiento")
-    st.caption("Elegí en qué estados fenológicos actúa cada tratamiento (S1–S4).")
+    st.caption("Por defecto, el selectivo preemergente (NR y Residual) actúa sobre S1–S4.")
+
+    # ⬅️ Defaults
     default_glifo   = ["S1","S2","S3","S4"]
-    default_selNR   = ["S1","S2","S3"]
-    default_selR    = ["S1","S2","S3","S4"]
-    default_gram    = ["S1","S2","S3"]       # por defecto, graminicida no S4
+    default_selNR   = ["S1","S2","S3","S4"]   # ← ahora incluye S4 por defecto
+    default_selR    = ["S1","S2","S3","S4"]   # ← ya estaba en S1–S4
+    default_gram    = ["S1","S2","S3"]        # graminicida post: por defecto no S4
     default_postR   = ["S1","S2","S3","S4"]
 
     states_glifo = st.multiselect("Glifosato (pre)", ["S1","S2","S3","S4"], default_glifo, disabled=not pre_glifo)
@@ -454,6 +456,12 @@ with st.sidebar:
     states_preR  = st.multiselect("Selectivo + residual (pre)", ["S1","S2","S3","S4"], default_selR, disabled=not pre_selR)
     states_gram  = st.multiselect("Graminicida (post)", ["S1","S2","S3","S4"], default_gram, disabled=not post_gram)
     states_postR = st.multiselect("Selectivo + residual (post)", ["S1","S2","S3","S4"], default_postR, disabled=not post_selR)
+
+# Fallbacks por si el usuario desmarca todo: se aplican a todos los estados
+if pre_selNR and (len(states_preNR) == 0):
+    states_preNR = ["S1","S2","S3","S4"]
+if pre_selR and (len(states_preR) == 0):
+    states_preR = ["S1","S2","S3","S4"]
 
 # =================== Factor de control diario ==========================
 fechas_d = ts.dt.date.values
