@@ -7,7 +7,8 @@
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
 # - Fenología (Avena fatua) por COHORTES: S1=1–6, S2=7–27, S3=28–59, S4=≥60 (edad desde emergencia)
 # - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra (t=0)
-# - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable)
+# - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable), PERO:
+#   ▸ **Selectivo + residual (pre)** aplica OBLIGATORIAMENTE a **S1–S4** durante todo su período de residualidad.
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
 # - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto (único).
 # - ▶ Reescalado proporcional por estado para conservar pesos relativos bajo cap A2.
@@ -24,7 +25,7 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Cohortes · A2 con tope seleccionable"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Cohortes · A2 seleccionable"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
 
@@ -37,8 +38,12 @@ with st.sidebar:
         index=0,
         help="Define el tope único de densidad efectiva y A2."
     ))
-st.caption(f"AUC(EMERREL cruda) ≙ tope A2 **= {int(MAX_PLANTS_CAP)} pl·m²**. Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2={int(MAX_PLANTS_CAP)} y reescalado proporcional por estado; todo desde siembra (t=0).")
+st.caption(
+    f"AUC(EMERREL cruda) ≙ tope A2 **= {int(MAX_PLANTS_CAP)} pl·m²**. "
+    "Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo y reescalado proporcional por estado; todo desde siembra (t=0)."
+)
 
+# ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10
 POST_GRAM_FORWARD_DAYS = 11
 
@@ -372,24 +377,31 @@ with st.sidebar:
         lam_exp = None
 if decaimiento_tipo != "Exponencial": lam_exp = None
 
+# =================== Estados objetivo por tratamiento ==================
 with st.sidebar:
     st.header("Estados objetivo por tratamiento")
-    st.caption("Por defecto, el selectivo preemergente (NR y Residual) actúa sobre S1–S4.")
+    st.caption(
+        "El **selectivo residual pre** actúa obligatoriamente sobre **S1–S4** durante su periodo de residualidad. "
+        "Los demás siguen siendo editables."
+    )
     default_glifo   = ["S1","S2","S3","S4"]
     default_selNR   = ["S1","S2","S3","S4"]
-    default_selR    = ["S1","S2","S3","S4"]
     default_gram    = ["S1","S2","S3"]
     default_postR   = ["S1","S2","S3","S4"]
 
     states_glifo = st.multiselect("Glifosato (pre)", ["S1","S2","S3","S4"], default_glifo, disabled=not pre_glifo)
     states_preNR = st.multiselect("Selectivo NR (pre)", ["S1","S2","S3","S4"], default_selNR, disabled=not pre_selNR)
-    states_preR  = st.multiselect("Selectivo + residual (pre)", ["S1","S2","S3","S4"], default_selR, disabled=not pre_selR)
+
+    # 🔒 Forzado: selectivo residual pre aplica a todas las cohortes
+    if pre_selR:
+        st.markdown("**Selectivo + residual (pre):** aplica a **S1–S4** (fijado)")
+    states_preR  = ["S1","S2","S3","S4"]  # forzado siempre
+
     states_gram  = st.multiselect("Graminicida (post)", ["S1","S2","S3","S4"], default_gram, disabled=not post_gram)
     states_postR = st.multiselect("Selectivo + residual (post)", ["S1","S2","S3","S4"], default_postR, disabled=not post_selR)
 
-# fallbacks
+# fallbacks (preR ya no necesita fallback)
 if pre_selNR and (len(states_preNR) == 0): states_preNR = ["S1","S2","S3","S4"]
-if pre_selR  and (len(states_preR)  == 0): states_preR  = ["S1","S2","S3","S4"]
 
 # =================== Ventanas de efecto ======================
 fechas_d = ts.dt.date.values
@@ -427,6 +439,7 @@ def apply_efficiency_per_state(weights, eff_pct, states_sel):
 
 if pre_glifo:  apply_efficiency_per_state(weights_one_day(pre_glifo_date), ef_pre_glifo, states_glifo)
 if pre_selNR:  apply_efficiency_per_state(weights_residual(pre_selNR_date, NR_DAYS_DEFAULT), ef_pre_selNR, states_preNR)
+# 🔒 pre residual (pre_selR) SIEMPRE sobre S1–S4 en su residualidad
 if pre_selR:   apply_efficiency_per_state(weights_residual(pre_selR_date,  pre_res_dias),   ef_pre_selR,  states_preR)
 if post_gram:  apply_efficiency_per_state(weights_residual(post_gram_date, POST_GRAM_FORWARD_DAYS), ef_post_gram, states_gram)
 if post_selR:  apply_efficiency_per_state(weights_residual(post_selR_date, post_res_dias), ef_post_selR, states_postR)
@@ -546,13 +559,13 @@ layout_kwargs = dict(
 )
 
 if factor_area_to_plants is not None and show_plants_axis:
-    # Eje derecho fijo 0–100 como solicitado
+    # Eje derecho fijo 0–100
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
         title=f"Plantas·m²·sem⁻¹ (cap A2={int(MAX_PLANTS_CAP)})",
         position=1.0,
-        range=[0, 100],     # escala fija 0–100
+        range=[0, 100],
         tick0=0,
         dtick=20,
         showgrid=False
@@ -568,7 +581,7 @@ if factor_area_to_plants is not None and show_plants_axis:
         hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (ctrl, cap): %{y:.2f}<extra></extra>"
     ))
 
-# Bandas/PC y Ciec (sobre eje diario)
+# Bandas/PC y Ciec
 def _add_label(center_ts, text, bgcolor, y=0.94):
     fig.add_annotation(x=center_ts, y=y, xref="x", yref="paper",
         text=text, showarrow=False, bgcolor=bgcolor, opacity=0.9,
@@ -618,7 +631,10 @@ if use_ciec and show_ciec_curve:
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
-st.caption(conv_caption + f" · A2 (cap) = {int(MAX_PLANTS_CAP)} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}")
+st.caption(
+    conv_caption +
+    f" · A2 (cap) = {int(MAX_PLANTS_CAP)} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}"
+)
 
 # ======================= A2 / x en UI ======================
 st.subheader(f"Densidad efectiva (x) y A2 (por AUC, cap={int(MAX_PLANTS_CAP)})")
