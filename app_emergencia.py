@@ -9,9 +9,11 @@
 # - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra (t=0)
 # - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable)
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
-# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2=250 estricto.
+# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto (único).
 # - ▶ Reescalado proporcional por estado para conservar pesos relativos bajo cap A2.
 # - ▶ Tope único de densidad efectiva y A2: **250 pl·m²** (no editable)
+# - ▶ Gráfico 1 con segunda escala (eje derecho) fija **0–100** para plantas·m²·semana
+# - ▶ Eliminado el gráfico de barras 100% apiladas
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -459,6 +461,7 @@ else:
     plantas_supresion_cap = plantas_supresion_ctrl_cap = np.full(len(ts), np.nan)
 
 # ========= CAP A2 CONSISTENTE POR ESTADO (reescalado proporcional por día) =========
+# Conserva pesos relativos diarios S1..S4 y garantiza suma ≤ cap
 if factor_area_to_plants is not None:
     total_ctrl_daily = (S1_pl_ctrl + S2_pl_ctrl + S3_pl_ctrl + S4_pl_ctrl)
     eps = 1e-12
@@ -517,7 +520,9 @@ if factor_area_to_plants is not None:
 else:
     X2 = X3 = float("nan"); loss_x2_pct = loss_x3_pct = float("nan")
 
-# ============================== Gráfico principal ==============================
+# ============================== Gráfico 1 (principal) ==============================
+st.subheader("📊 Gráfico 1: EMERREL + Aportes (cohortes, cap A2=250) — Serie semanal (W-MON)")
+
 fig = go.Figure()
 
 # EMERREL cruda (izquierda) como referencia
@@ -529,46 +534,32 @@ fig.add_trace(go.Scatter(
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title="EMERREL + Aportes (cohortes, cap A2=250) · Serie semanal (W-MON)",
+    title="EMERREL + aportes (izq) y Plantas·m²·semana (der, 0–100)",
     xaxis_title="Tiempo",
     yaxis_title="EMERREL",
 )
 
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-# Mejora de la segunda escala: eje derecho con BARRAS semanales y grid claro
-# >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
 if factor_area_to_plants is not None and show_plants_axis:
-    plantas_max = float(np.nanmax([
-        safe_nanmax(plm2sem_sin_ctrl_cap, MAX_PLANTS_CAP),
-        safe_nanmax(plm2sem_con_ctrl_cap, MAX_PLANTS_CAP),
-        MAX_PLANTS_CAP
-    ]))
-    if not np.isfinite(plantas_max) or plantas_max <= 0: plantas_max = MAX_PLANTS_CAP
-
+    # Eje derecho fijo 0–100 como solicitaste
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
-        title="Plantas·m²·sem⁻¹ (cohortes, cap A2=250)",
+        title="Plantas·m²·sem⁻¹ (cap A2=250)",
         position=1.0,
-        range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
+        range=[0, 100],     # <<< escala fija 0–100
         tick0=0,
-        dtick=DTICK_RIGHT,
-        showgrid=True,           # << grid visible para lectura clara
-        gridwidth=0.5,
-        zeroline=True,
-        tickformat=",d"
+        dtick=20,
+        showgrid=False
     )
-
-    # Barras lado a lado por semana (offsetgroup)
-    fig.add_trace(go.Bar(
+    fig.add_trace(go.Scatter(
         x=sem_x, y=plm2sem_sin_ctrl_cap, name="Aporte semanal (sin control, cap)",
-        yaxis="y2", offsetgroup="a", hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (sin ctrl): %{y:.0f}<extra></extra>",
-        opacity=0.85
+        yaxis="y2", mode="lines+markers",
+        hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (sin ctrl, cap): %{y:.2f}<extra></extra>"
     ))
-    fig.add_trace(go.Bar(
+    fig.add_trace(go.Scatter(
         x=sem_x, y=plm2sem_con_ctrl_cap, name="Aporte semanal (con control, cap)",
-        yaxis="y2", offsetgroup="b", hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (ctrl): %{y:.0f}<extra></extra>",
-        opacity=0.75
+        yaxis="y2", mode="lines+markers", line=dict(dash="dot"),
+        hovertemplate="Semana (Lun): %{x|%Y-%m-%d}<br>pl·m²·sem⁻¹ (ctrl, cap): %{y:.2f}<extra></extra>"
     ))
 
 # Bandas/PC y Ciec (sobre eje diario)
@@ -619,7 +610,7 @@ if use_ciec and show_ciec_curve:
         hovertemplate="Fecha: %{x|%Y-%m-%d}<br>Ciec: %{y:.2f}<extra></extra>"
     ))
 
-fig.update_layout(**layout_kwargs, barmode="group")
+fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
 st.caption(conv_caption + f" · A2 (cap) = {int(MAX_PLANTS_CAP)} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}")
 
@@ -679,3 +670,101 @@ if len(sched):
 else:
     st.info("Activa alguna intervención y define la(s) fecha(s).")
 
+# =========================== Descargas de series ======================
+with st.expander("Descargas de series (semanal)", expanded=True):
+    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2=250) y acumulados.")
+    if factor_area_to_plants is not None:
+        out_w = df_week_cap.rename(columns={
+            "fecha": "semana_lunes",
+            "pl_sin_ctrl_cap": "plm2sem_sin_ctrl_cap",
+            "pl_con_ctrl_cap": "plm2sem_con_ctrl_cap",
+            "pl_base_cap": "plm2sem_base_cap"
+        })
+        st.dataframe(out_w.tail(16), use_container_width=True)
+        st.download_button("Descargar serie semanal (CSV)", out_w.to_csv(index=False).encode("utf-8"),
+                           "serie_semanal_cohortes_control_cap.csv", "text/csv", key="dl_serie_semanal")
+    else:
+        st.info("AUC cruda = 0 → no se puede escalar a plantas·m².")
+
+# ============================== Diagnóstico ===========================
+st.subheader("Diagnóstico")
+if factor_area_to_plants is not None:
+    contrib_S1 = float(np.nansum(S1_pl_ctrl_cap[mask_since_sow]))
+    contrib_S2 = float(np.nansum(S2_pl_ctrl_cap[mask_since_sow]))
+    contrib_S3 = float(np.nansum(S3_pl_ctrl_cap[mask_since_sow]))
+    contrib_S4 = float(np.nansum(S4_pl_ctrl_cap[mask_since_sow]))
+else:
+    contrib_S1 = contrib_S2 = contrib_S3 = contrib_S4 = float("nan")
+
+_diag = {
+    "siembra": str(sow_date),
+    "tope_A2_plm2": MAX_PLANTS_CAP,
+    "PC": {"start": str(PC_START.date()), "end": str(PC_END.date()), "ref": ref_pc},
+    "AUC_EMERREL_cruda_desde_siembra_dias": float(auc_cruda),
+    "A2_sup_cap": float(A2_sup_final) if np.isfinite(A2_sup_final) else None,
+    "A2_ctrl_cap": float(A2_ctrl_final) if np.isfinite(A2_ctrl_final) else None,
+    "x2_sin_ctrl_cap": float(X2) if np.isfinite(X2) else None,
+    "x3_con_ctrl_cap": float(X3) if np.isfinite(X3) else None,
+    "perdida_x2_pct": float(loss_x2_pct) if np.isfinite(loss_x2_pct) else None,
+    "perdida_x3_pct": float(loss_x3_pct) if np.isfinite(loss_x3_pct) else None,
+    "FC_S": {"S1": 0.0, "S2": 0.3, "S3": 0.6, "S4": 1.0},
+    "contrib_plm2_por_estado_ctrl_cap": {"S1": contrib_S1, "S2": contrib_S2, "S3": contrib_S3, "S4": contrib_S4},
+    "unidad_salidas": "pl·m²·sem⁻¹ (W-MON)",
+}
+st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
+
+# ===================== Composición porcentual por estado en PC =====================
+# (Eliminado el gráfico de barras 100% apiladas según pedido; se mantiene el donut)
+st.subheader("Composición porcentual por estado en el Periodo Crítico (PC)")
+mask_pc_days = (ts >= PC_START) & (ts <= PC_END)
+
+if factor_area_to_plants is None or not np.isfinite(factor_area_to_plants):
+    st.info("AUC cruda = 0 → no se puede escalar a plantas·m²; no es posible calcular aportes en PC.")
+else:
+    mspc = (mask_since_sow & mask_pc_days).to_numpy()
+
+    # Aportes absolutos (pl·m²) por estado, ya CAPEADOS proporcionalmente
+    a_S1 = float(np.nansum(S1_pl_ctrl_cap[mspc]))
+    a_S2 = float(np.nansum(S2_pl_ctrl_cap[mspc]))
+    a_S3 = float(np.nansum(S3_pl_ctrl_cap[mspc]))
+    a_S4 = float(np.nansum(S4_pl_ctrl_cap[mspc]))
+    tot  = a_S1 + a_S2 + a_S3 + a_S4
+
+    labels = ["S1 (FC=0.0)", "S2 (FC=0.3)", "S3 (FC=0.6)", "S4 (FC=1.0)"]
+    absolutos = np.array([a_S1, a_S2, a_S3, a_S4], dtype=float)
+
+    pct = (100.0 * absolutos / tot) if (np.isfinite(tot) and tot > 0) else np.array([np.nan, np.nan, np.nan, np.nan])
+
+    df_pc_pct = pd.DataFrame({
+        "Estado": labels,
+        "% del total PC": pct
+    }).sort_values("% del total PC", ascending=False).reset_index(drop=True)
+
+    st.markdown(
+        f"**Ventana PC:** {PC_START.date()} → {PC_END.date()}  \n"
+        f"**Total (S1–S4) en PC:** **{tot:,.1f}** pl·m²"
+    )
+
+    st.dataframe(df_pc_pct, use_container_width=True)
+
+    st.download_button(
+        "Descargar composición porcentual en PC (CSV)",
+        df_pc_pct.to_csv(index=False).encode("utf-8"),
+        "composicion_porcentual_estados_PC.csv",
+        "text/csv",
+        key="dl_pct_estados_pc"
+    )
+
+    # Donut (se mantiene)
+    fig_pc_donut = go.Figure(data=[go.Pie(
+        labels=labels,
+        values=pct,
+        hole=0.5,
+        textinfo="label+percent",
+        hovertemplate="%{label}<br>%: %{value:.2f}%<extra></extra>"
+    )])
+    fig_pc_donut.update_layout(
+        title="Composición porcentual por estado en el Periodo Crítico (donut)",
+        margin=dict(l=10, r=10, t=50, b=10)
+    )
+    st.plotly_chart(fig_pc_donut, use_container_width=True)
