@@ -2,15 +2,16 @@
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (AUC) + Fenología por COHORTES (S1..S4)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI)
-# - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (850/500/250/100 pl·m²)
+# - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (= 250 pl·m²)
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
 # - Fenología (Avena fatua) por COHORTES: S1=1–6, S2=7–27, S3=28–59, S4=≥60 (edad desde emergencia)
 # - x = ∑_estados ∫ (pl·m²·día⁻¹_ctrl_estado) dt, desde siembra (t=0)
 # - Selectivo preemergente (NR y Residual) por defecto actúa sobre S1–S4 (editable)
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
-# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto.
+# - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto (único).
 # - ▶ Reescalado proporcional por estado para conservar pesos relativos bajo cap A2.
+# - ▶ Tope único de densidad efectiva y A2: **250 pl·m²** (no editable)
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -21,14 +22,16 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2 · Semanal"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2=250 · Semanal"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("AUC(EMERREL cruda) ≙ tope A2 (850/500/250/100 pl·m²). Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2 y reescalado proporcional por estado, computando desde siembra (t=0).")
+st.caption("AUC(EMERREL cruda) ≙ tope A2 **= 250 pl·m²**. Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2=250 y reescalado proporcional por estado; todo computado desde siembra (t=0).")
 
 # ========================== Constantes y helpers ==========================
 NR_DAYS_DEFAULT = 10
 POST_GRAM_FORWARD_DAYS = 11
+MAX_PLANTS_CAP = 250.0                # <<< TOPE ÚNICO
+DTICK_RIGHT = 50                      # ticks eje derecho acorde al tope 250
 
 def safe_nanmax(arr, fallback=0.0):
     try:
@@ -214,10 +217,10 @@ with st.sidebar:
     Cs = st.number_input("Densidad estándar Cs (pl/m²)", 50, 700, 250, 10)
     LAIhc = st.number_input("LAIhc (escenario altamente competitivo)", 0.5, 10.0, 3.5, 0.1)
 
-    st.header("Tope A2 (pl·m²)")
-    cap_choice = st.selectbox("Elegí el tope para A2", [850, 500, 250, 100], index=0)
-MAX_PLANTS_CAP = float(cap_choice)
-DTICK_RIGHT = {850: 170, 500: 100, 250: 50, 100: 20}.get(int(MAX_PLANTS_CAP), max(10, round(MAX_PLANTS_CAP/5)))
+with st.sidebar:
+    st.header("Tope A2 / densidad efectiva")
+    st.markdown(f"**Tope único**: `{int(MAX_PLANTS_CAP)} pl·m²`")
+    st.caption("Este valor se usa en la equivalencia por área, el cap acumulativo, A2/A2_ctrl y ejes.")
 
 # ========================= Periodo crítico (PC) ========================
 with st.sidebar:
@@ -286,7 +289,7 @@ auc_cruda = auc_time(ts, df_plot["EMERREL"].to_numpy(dtype=float), mask=mask_sin
 
 if auc_cruda > 0:
     factor_area_to_plants = MAX_PLANTS_CAP / auc_cruda
-    conv_caption = f"AUC(EMERREL cruda desde siembra) = {auc_cruda:.4f} → {MAX_PLANTS_CAP:.0f} pl·m² (factor={factor_area_to_plants:.4f} pl·m² por EMERREL·día)"
+    conv_caption = f"AUC(EMERREL cruda desde siembra) = {auc_cruda:.4f} → {int(MAX_PLANTS_CAP)} pl·m² (factor={factor_area_to_plants:.4f} pl·m² por EMERREL·día)"
 else:
     factor_area_to_plants = None
     conv_caption = "No se pudo escalar por área (AUC de EMERREL cruda = 0)."
@@ -527,7 +530,7 @@ fig.add_trace(go.Scatter(
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title="EMERREL + Aportes (cohortes, cap A2) · Serie semanal (W-MON)",
+    title="EMERREL + Aportes (cohortes, cap A2=250) · Serie semanal (W-MON)",
     xaxis_title="Tiempo",
     yaxis_title="EMERREL",
 )
@@ -542,7 +545,7 @@ if factor_area_to_plants is not None and show_plants_axis:
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
-        title="Plantas·m²·sem⁻¹ (cohortes, cap A2)",
+        title="Plantas·m²·sem⁻¹ (cohortes, cap A2=250)",
         position=1.0,
         range=[0, max(plantas_max * 1.15, MAX_PLANTS_CAP * 1.15)],
         tick0=0,
@@ -609,10 +612,10 @@ if use_ciec and show_ciec_curve:
 
 fig.update_layout(**layout_kwargs)
 st.plotly_chart(fig, use_container_width=True)
-st.caption(conv_caption + f" · A2 (cap) = {MAX_PLANTS_CAP:.0f} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}")
+st.caption(conv_caption + f" · A2 (cap) = {int(MAX_PLANTS_CAP)} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}")
 
 # ======================= A2 / x en UI ======================
-st.subheader("Densidad efectiva (x) y A2 (por AUC, cap)")
+st.subheader("Densidad efectiva (x) y A2 (por AUC, cap=250)")
 st.markdown(
     f"""
 **x₂ — Sin control (cap):** **{X2:,.1f}** pl·m²  
@@ -623,7 +626,7 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
-st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x, cap)")
+st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x, cap=250)")
 def fmt_or_nan(v): return f"{v:.2f}%" if np.isfinite(v) else "—"
 st.markdown(f"**x₂ → pérdida:** **{fmt_or_nan(loss_x2_pct)}** · **x₃ → pérdida:** **{fmt_or_nan(loss_x3_pct)}**")
 
@@ -651,7 +654,7 @@ if np.isfinite(X3):
         hovertemplate="x₃ = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
     ))
 fig_loss.update_layout(
-    title="Pérdida de rendimiento (%) vs. densidad efectiva (x, cap A2)",
+    title="Pérdida de rendimiento (%) vs. densidad efectiva (x, cap A2=250)",
     xaxis_title="x (pl·m²) — integral de aportes (cohortes, cap) desde siembra",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
@@ -669,7 +672,7 @@ else:
 
 # =========================== Descargas de series ======================
 with st.expander("Descargas de series (semanal)", expanded=True):
-    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2) y acumulados (tope {MAX_PLANTS_CAP:.0f}).")
+    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2=250) y acumulados.")
     if factor_area_to_plants is not None:
         out_w = df_week_cap.rename(columns={
             "fecha": "semana_lunes",
