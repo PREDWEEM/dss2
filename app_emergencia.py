@@ -2,7 +2,7 @@
 # app.py — PREDWEEM · Supresión (EMERREL × (1−Ciec)) + Control (AUC) + Fenología por COHORTES (S1..S4)
 # - Sin ICIC
 # - Ciec desde canopia (FC/LAI)
-# - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (= 250 pl·m²)
+# - Equivalencia por área: AUC[EMERREL (cruda) desde siembra] ≙ MAX_PLANTS_CAP (62/125/250 pl·m²)
 # - A2 = MAX_PLANTS_CAP * ( AUC[supresión] / AUC[cruda] )
 # - A2_ctrl = MAX_PLANTS_CAP * ( AUC[supresión×control] / AUC[cruda] )
 # - Fenología (Avena fatua) por COHORTES: S1=1–6, S2=7–27, S3=28–59, S4=≥60 (edad desde emergencia)
@@ -11,9 +11,9 @@
 # - Graminicida post = día 0 + 10 días hacia adelante (11 días totales)
 # - ▶ Salidas agregadas principales en **pl·m²·sem⁻¹** (semanas etiquetadas en LUNES). Cap A2 estricto (único).
 # - ▶ Reescalado proporcional por estado para conservar pesos relativos bajo cap A2.
-# - ▶ Tope único de densidad efectiva y A2: **250 pl·m²** (no editable)
-# - ▶ Gráfico 1 con segunda escala (eje derecho) fija **0–100** para plantas·m²·semana
+# - ▶ Eje derecho del Gráfico 1 fijo en **0–100** para plantas·m²·semana
 # - ▶ Eliminado el gráfico de barras 100% apiladas
+# - ▶ Selector de escenario de infestación: **62 / 125 / 250 pl·m²**
 
 import io, re, json, math, datetime as dt
 import numpy as np
@@ -24,16 +24,23 @@ from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from datetime import timedelta
 
-APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Fenología (cohortes) · Tope A2=250 · Semanal"
+APP_TITLE = "PREDWEEM · Supresión (1−Ciec) + Control (AUC) + Cohortes · A2 con tope seleccionable"
 st.set_page_config(page_title=APP_TITLE, layout="wide", initial_sidebar_state="expanded")
 st.title(APP_TITLE)
-st.caption("AUC(EMERREL cruda) ≙ tope A2 **= 250 pl·m²**. Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2=250 y reescalado proporcional por estado; todo computado desde siembra (t=0).")
 
-# ========================== Constantes y helpers ==========================
+# ========================== Selector de escenario ==========================
+with st.sidebar:
+    st.header("Escenario de infestación")
+    MAX_PLANTS_CAP = float(st.selectbox(
+        "Tope de densidad efectiva (pl·m²)",
+        options=[250, 125, 62],
+        index=0,
+        help="Define el tope único de densidad efectiva y A2."
+    ))
+st.caption(f"AUC(EMERREL cruda) ≙ tope A2 **= {int(MAX_PLANTS_CAP)} pl·m²**. Cohortes S1..S4 (edad desde emergencia). Salidas en pl·m²·sem⁻¹ con cap acumulativo A2={int(MAX_PLANTS_CAP)} y reescalado proporcional por estado; todo desde siembra (t=0).")
+
 NR_DAYS_DEFAULT = 10
 POST_GRAM_FORWARD_DAYS = 11
-MAX_PLANTS_CAP = 250.0                # <<< TOPE ÚNICO
-DTICK_RIGHT = 50                      # ticks eje derecho acorde al tope 250
 
 def safe_nanmax(arr, fallback=0.0):
     try:
@@ -221,8 +228,8 @@ with st.sidebar:
 
 with st.sidebar:
     st.header("Tope A2 / densidad efectiva")
-    st.markdown(f"**Tope único**: `{int(MAX_PLANTS_CAP)} pl·m²`")
-    st.caption("Este valor se usa en la equivalencia por área, el cap acumulativo, A2/A2_ctrl y ejes.")
+    st.markdown(f"**Tope seleccionado**: `{int(MAX_PLANTS_CAP)} pl·m²`")
+    st.caption("Se usa en la equivalencia por área, el cap acumulativo, A2/A2_ctrl y ejes.")
 
 # ========================= Periodo crítico (PC) ========================
 with st.sidebar:
@@ -461,7 +468,6 @@ else:
     plantas_supresion_cap = plantas_supresion_ctrl_cap = np.full(len(ts), np.nan)
 
 # ========= CAP A2 CONSISTENTE POR ESTADO (reescalado proporcional por día) =========
-# Conserva pesos relativos diarios S1..S4 y garantiza suma ≤ cap
 if factor_area_to_plants is not None:
     total_ctrl_daily = (S1_pl_ctrl + S2_pl_ctrl + S3_pl_ctrl + S4_pl_ctrl)
     eps = 1e-12
@@ -521,7 +527,7 @@ else:
     X2 = X3 = float("nan"); loss_x2_pct = loss_x3_pct = float("nan")
 
 # ============================== Gráfico 1 (principal) ==============================
-st.subheader("📊 Gráfico 1: EMERREL + Aportes (cohortes, cap A2=250) — Serie semanal (W-MON)")
+st.subheader(f"📊 Gráfico 1: EMERREL + aportes (cohortes, cap A2={int(MAX_PLANTS_CAP)}) — Serie semanal (W-MON)")
 
 fig = go.Figure()
 
@@ -534,19 +540,19 @@ fig.add_trace(go.Scatter(
 
 layout_kwargs = dict(
     margin=dict(l=10, r=10, t=40, b=10),
-    title="EMERREL + aportes (izq) y Plantas·m²·semana (der, 0–100)",
+    title=f"EMERREL + aportes (izq) y Plantas·m²·semana (der, 0–100) · Tope={int(MAX_PLANTS_CAP)}",
     xaxis_title="Tiempo",
     yaxis_title="EMERREL",
 )
 
 if factor_area_to_plants is not None and show_plants_axis:
-    # Eje derecho fijo 0–100 como solicitaste
+    # Eje derecho fijo 0–100 como solicitado
     layout_kwargs["yaxis2"] = dict(
         overlaying="y",
         side="right",
-        title="Plantas·m²·sem⁻¹ (cap A2=250)",
+        title=f"Plantas·m²·sem⁻¹ (cap A2={int(MAX_PLANTS_CAP)})",
         position=1.0,
-        range=[0, 100],     # <<< escala fija 0–100
+        range=[0, 100],     # escala fija 0–100
         tick0=0,
         dtick=20,
         showgrid=False
@@ -615,7 +621,7 @@ st.plotly_chart(fig, use_container_width=True)
 st.caption(conv_caption + f" · A2 (cap) = {int(MAX_PLANTS_CAP)} pl·m² · A2_sup={A2_sup_final if np.isfinite(A2_sup_final) else float('nan'):.1f} · A2_ctrl={A2_ctrl_final if np.isfinite(A2_ctrl_final) else float('nan'):.1f}")
 
 # ======================= A2 / x en UI ======================
-st.subheader("Densidad efectiva (x) y A2 (por AUC, cap=250)")
+st.subheader(f"Densidad efectiva (x) y A2 (por AUC, cap={int(MAX_PLANTS_CAP)})")
 st.markdown(
     f"""
 **x₂ — Sin control (cap):** **{X2:,.1f}** pl·m²  
@@ -626,7 +632,7 @@ st.markdown(
 )
 
 # ======================= Pérdida de rendimiento (%) ===================
-st.subheader("Pérdida de rendimiento estimada (%) — por densidad efectiva (x, cap=250)")
+st.subheader(f"Pérdida de rendimiento estimada (%) — por densidad efectiva (x, cap={int(MAX_PLANTS_CAP)})")
 def fmt_or_nan(v): return f"{v:.2f}%" if np.isfinite(v) else "—"
 st.markdown(f"**x₂ → pérdida:** **{fmt_or_nan(loss_x2_pct)}** · **x₃ → pérdida:** **{fmt_or_nan(loss_x3_pct)}**")
 
@@ -654,7 +660,7 @@ if np.isfinite(X3):
         hovertemplate="x₃ = %{x:.1f} pl·m²<br>Pérdida: %{y:.2f}%<extra></extra>"
     ))
 fig_loss.update_layout(
-    title="Pérdida de rendimiento (%) vs. densidad efectiva (x, cap A2=250)",
+    title=f"Pérdida de rendimiento (%) vs. densidad efectiva (x, cap A2={int(MAX_PLANTS_CAP)})",
     xaxis_title="x (pl·m²) — integral de aportes (cohortes, cap) desde siembra",
     yaxis_title="Pérdida de rendimiento (%)",
     margin=dict(l=10, r=10, t=40, b=10)
@@ -672,7 +678,7 @@ else:
 
 # =========================== Descargas de series ======================
 with st.expander("Descargas de series (semanal)", expanded=True):
-    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2=250) y acumulados.")
+    st.caption(conv_caption + f" · Columnas en **pl·m²·sem⁻¹** (cap A2={int(MAX_PLANTS_CAP)}) y acumulados.")
     if factor_area_to_plants is not None:
         out_w = df_week_cap.rename(columns={
             "fecha": "semana_lunes",
@@ -714,7 +720,7 @@ _diag = {
 st.code(json.dumps(_diag, ensure_ascii=False, indent=2))
 
 # ===================== Composición porcentual por estado en PC =====================
-# (Eliminado el gráfico de barras 100% apiladas según pedido; se mantiene el donut)
+# (Eliminado el gráfico de barras 100% apiladas; se mantiene el donut)
 st.subheader("Composición porcentual por estado en el Periodo Crítico (PC)")
 mask_pc_days = (ts >= PC_START) & (ts <= PC_END)
 
